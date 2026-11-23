@@ -126,10 +126,14 @@ public class MainActivity extends Activity {
     private AlertDialog delayDialog;
     private boolean lastNight;
     /** Перетаскивание на рабочем столе: что тащим и чем закончилось. */
-    private String dragItem;
+    private String dragItem;          // "a:…"/"f:…" с рабочего стола или "new:<ключ>" из списка
     private boolean dropOnSelf;
+    private boolean dropDone;
+    private float dragStartX, dragStartY, dragMaxMove;
+    /** Снимок сетки на время перетаскивания (чтобы не читать настройки на каждое движение). */
+    private java.util.TreeMap<Integer, String> dragGrid = new java.util.TreeMap<>();
     private TextView removeZone;
-    private static final int CELL_H = 96;
+    private TextView emptyHint;
     private boolean lastVideo;
 
     // ------------------------------------------------------------------ lifecycle
@@ -284,13 +288,21 @@ public class MainActivity extends Activity {
         widgetsBox.setOrientation(LinearLayout.VERTICAL);
         home.addView(widgetsBox, matchWrap());
 
-        // Сетка иконок прижата к низу: сверху пустое место (как просили — не у самого верха).
-        View spacer = new View(this);
-        home.addView(spacer, new LinearLayout.LayoutParams(1, 0, 1f));
+        emptyHint = new TextView(this);
+        emptyHint.setText("Свайп вверх — все приложения. Зажми приложение и перетащи сюда.\n"
+                + "Долгое нажатие на пустом месте — настройки.");
+        style(emptyHint, 14, TEXT_DIM);
+        emptyHint.setPadding(dp(8), dp(12), dp(8), 0);
+        emptyHint.setVisibility(View.GONE);
+        home.addView(emptyHint, wrap());
 
+        // Свободная сетка 4×6 на всё оставшееся место — как в Pixel Launcher.
         grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
-        home.addView(grid, matchWrap());
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        glp.topMargin = dp(8);
+        home.addView(grid, glp);
 
         root.addView(home, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -337,7 +349,7 @@ public class MainActivity extends Activity {
         list.setAdapter(adapter);
         list.setOnItemClickListener((p, v, pos, id) -> launch(filtered.get(pos), v));
         list.setOnItemLongClickListener((p, v, pos, id) -> {
-            showDrawerAppMenu(filtered.get(pos));
+            startDrawerDrag(filtered.get(pos), v);
             return true;
         });
         list.setOnScrollListener(new AbsListView.OnScrollListener() {
@@ -353,32 +365,58 @@ public class MainActivity extends Activity {
         root.addView(drawer, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // ---- Зона «Убрать» — появляется сверху, пока тащишь иконку
+        // ---- «✕ Убрать» сверху, пока тащишь иконку с рабочего стола (как в Pixel Launcher)
         removeZone = new TextView(this);
-        removeZone.setText("✕  Убрать с рабочего стола");
-        removeZone.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        removeZone.setText("✕  Убрать");
+        removeZone.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         removeZone.setTextColor(TEXT);
+        removeZone.setShadowLayer(8f, 0f, 1f, 0xAA000000);
         removeZone.setGravity(Gravity.CENTER);
-        removeZone.setBackgroundColor(0x99B00020);
         removeZone.setVisibility(View.GONE);
         removeZone.setOnDragListener((v, e) -> {
             switch (e.getAction()) {
-                case DragEvent.ACTION_DRAG_ENTERED: v.setBackgroundColor(0xEEB00020); return true;
-                case DragEvent.ACTION_DRAG_EXITED: v.setBackgroundColor(0x99B00020); return true;
+                case DragEvent.ACTION_DRAG_STARTED:
+                    return dragItem != null && !dragItem.startsWith("new:");
+                case DragEvent.ACTION_DRAG_ENTERED:
+                    removeZone.setTextColor(0xFFFF6B6B);
+                    removeZone.setScaleX(1.1f);
+                    removeZone.setScaleY(1.1f);
+                    return true;
+                case DragEvent.ACTION_DRAG_EXITED:
+                case DragEvent.ACTION_DRAG_ENDED:
+                    removeZone.setTextColor(TEXT);
+                    removeZone.setScaleX(1f);
+                    removeZone.setScaleY(1f);
+                    return true;
                 case DragEvent.ACTION_DROP:
-                    v.setBackgroundColor(0x99B00020);
+                    dropDone = true;
                     removeDragged(dragItem);
                     return true;
-                default: return true;
+                default:
+                    return true;
             }
         });
         root.addView(removeZone, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(64), Gravity.TOP));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(56), Gravity.TOP));
 
         // Конец перетаскивания (куда бы ни отпустили): вернуть экран в обычный вид.
         home.setOnDragListener((v, e) -> {
-            if (e.getAction() == DragEvent.ACTION_DRAG_ENDED) onDragFinished();
-            return true;
+            switch (e.getAction()) {
+                case DragEvent.ACTION_DRAG_STARTED:
+                    dragStartX = e.getX();
+                    dragStartY = e.getY();
+                    dragMaxMove = 0f;
+                    return true;
+                case DragEvent.ACTION_DRAG_LOCATION:
+                    dragMaxMove = Math.max(dragMaxMove,
+                            Math.abs(e.getX() - dragStartX) + Math.abs(e.getY() - dragStartY));
+                    return true;
+                case DragEvent.ACTION_DRAG_ENDED:
+                    onDragFinished();
+                    return true;
+                default:
+                    return true;
+            }
         });
     }
 
@@ -417,61 +455,53 @@ public class MainActivity extends Activity {
     private void renderHome() {
         grid.removeAllViews();
         if (allApps.isEmpty()) return; // приложения ещё загружаются
-        List<View> cells = new ArrayList<>();
-        List<String> shownItems = new ArrayList<>();
-        for (String item : prefs.home()) {
-            if (cells.size() >= Prefs.MAX_HOME) break;
-            View cell = null;
-            if (item.startsWith("a:")) {
-                AppEntry app = byKey.get(item.substring(2));
-                // Две зоны: отвлекающие приложения на рабочий стол не попадают.
-                if (app != null && !Guard.isDistracting(prefs, app.packageName())) {
-                    cell = appCell(app, null);
-                }
-            } else if (item.startsWith("f:")) {
-                String id = item.substring(2);
-                List<AppEntry> apps = folderEntries(id);
-                if (!apps.isEmpty()) cell = folderCell(id, apps);
+        java.util.TreeMap<Integer, String> g = prefs.grid();
+        emptyHint.setVisibility(g.isEmpty() ? View.VISIBLE : View.GONE);
+        for (int r = 0; r < Prefs.ROWS; r++) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            for (int c = 0; c < Prefs.COLS; c++) {
+                int cell = r * Prefs.COLS + c;
+                String item = g.get(cell);
+                View v = item == null ? null : homeCell(item);
+                if (v == null) v = new View(this);
+                FrameLayout slot = new FrameLayout(this);
+                slot.addView(v, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+                slot.setOnDragListener(new SlotDrag(cell));
+                row.addView(slot, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
             }
-            if (cell != null) {
-                cells.add(cell);
-                shownItems.add(item);
-            }
+            grid.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         }
-        if (cells.isEmpty()) {
-            TextView hint = new TextView(this);
-            hint.setText("Свайп вверх — все приложения.\n"
-                    + "Долгое нажатие на приложение — «На рабочий стол».\n"
-                    + "Долгое нажатие на пустом месте — настройки.");
-            style(hint, 15, TEXT_DIM);
-            hint.setPadding(dp(8), 0, dp(8), dp(16));
-            grid.addView(hint, wrap());
-            return;
+    }
+
+    /** Вид элемента рабочего стола или null, если приложения сейчас нет. */
+    private View homeCell(String item) {
+        if (item.startsWith("a:")) {
+            AppEntry app = byKey.get(item.substring(2));
+            // Две зоны: отвлекающие приложения на рабочем столе не показываются.
+            if (app == null || Guard.isDistracting(prefs, app.packageName())) return null;
+            return appCell(app, null);
         }
-        // Всегда 12 мест (4×3): пустые места тоже принимают перетаскивание.
-        List<View> slots = new ArrayList<>();
-        for (int i = 0; i < Prefs.MAX_HOME; i++) {
-            View slot;
-            if (i < cells.size()) {
-                slot = cells.get(i);
-            } else {
-                slot = new View(this);
-                slot.setMinimumHeight(dp(CELL_H));
-            }
-            slot.setOnDragListener(new SlotDrag(i < shownItems.size() ? shownItems.get(i) : null));
-            slots.add(slot);
+        if (item.startsWith("f:")) {
+            String id = item.substring(2);
+            List<AppEntry> apps = folderEntries(id);
+            return apps.isEmpty() ? null : folderCell(id, apps);
         }
-        addRows(grid, slots);
+        return null;
     }
 
     // ------------------------------------------------------------------ перетаскивание
 
     private void startDrag(String item, View cell, View icon) {
         dragItem = item;
+        dragGrid = prefs.grid();
         dropOnSelf = false;
+        dropDone = false;
         cell.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
         ClipData data = ClipData.newPlainText("launcher", item);
-        // Зону «Убрать» показываем ДО начала перетаскивания: иначе она не получит событий.
+        // «Убрать» показываем ДО начала перетаскивания: иначе зона не получит событий.
         removeZone.setVisibility(View.VISIBLE);
         if (cell.startDragAndDrop(data, new View.DragShadowBuilder(icon), item, 0)) {
             cell.setAlpha(0.3f);
@@ -482,11 +512,40 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Подсветка и приём «броска» на место рабочего стола. */
-    private final class SlotDrag implements View.OnDragListener {
-        private final String target; // null — пустое место
+    /** Из общего списка: зажал — список уезжает, тащишь иконку прямо на рабочий стол. */
+    private void startDrawerDrag(AppEntry app, View row) {
+        if (Guard.isDistracting(prefs, app.packageName())) {
+            // Две зоны: отвлекающие на рабочий стол нельзя — сразу меню.
+            showDrawerAppMenu(app);
+            return;
+        }
+        View icon = row instanceof ViewGroup && ((ViewGroup) row).getChildCount() > 0
+                ? ((ViewGroup) row).getChildAt(0) : row;
+        dragItem = "new:" + app.key;
+        dragGrid = prefs.grid();
+        dropOnSelf = false;
+        dropDone = false;
+        row.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        hideKeyboard();
+        home.animate().cancel();
+        home.setAlpha(1f);
+        ClipData data = ClipData.newPlainText("launcher", dragItem);
+        if (row.startDragAndDrop(data, new View.DragShadowBuilder(icon), dragItem, 0)) {
+            drawerOpen = false;
+            unregisterBack();
+            drawer.animate().cancel();
+            drawer.setVisibility(View.GONE);
+        } else {
+            dragItem = null;
+            showDrawerAppMenu(app);
+        }
+    }
 
-        SlotDrag(String target) { this.target = target; }
+    /** Подсветка и приём «броска» на клетку сетки. */
+    private final class SlotDrag implements View.OnDragListener {
+        private final int cell;
+
+        SlotDrag(int cell) { this.cell = cell; }
 
         @Override
         public boolean onDrag(View v, DragEvent e) {
@@ -494,10 +553,8 @@ public class MainActivity extends Activity {
                 case DragEvent.ACTION_DRAG_STARTED:
                     return dragItem != null;
                 case DragEvent.ACTION_DRAG_ENTERED:
-                    if (dragItem != null && !dragItem.equals(target)) v.setBackground(highlight(v, e));
-                    return true;
                 case DragEvent.ACTION_DRAG_LOCATION:
-                    if (dragItem != null && !dragItem.equals(target)) v.setBackground(highlight(v, e));
+                    v.setBackground(highlight(v, e, cell));
                     return true;
                 case DragEvent.ACTION_DRAG_EXITED:
                 case DragEvent.ACTION_DRAG_ENDED:
@@ -505,7 +562,8 @@ public class MainActivity extends Activity {
                     return true;
                 case DragEvent.ACTION_DROP:
                     v.setBackground(null);
-                    dropOn(target, overIcon(v, e));
+                    dropDone = true;
+                    dropOn(cell, overIcon(v, e));
                     return true;
                 default:
                     return true;
@@ -513,64 +571,99 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Палец над самой иконкой (а не у края ячейки) — значит «положить в папку». */
+    /** Палец над самой иконкой (а не у края клетки) — «положить в папку». */
     private boolean overIcon(View v, DragEvent e) {
-        return e.getX() > v.getWidth() * 0.22f && e.getX() < v.getWidth() * 0.78f && e.getY() < dp(70);
+        float cx = v.getWidth() / 2f, cy = v.getHeight() / 2f;
+        return Math.abs(e.getX() - cx) < dp(26) && Math.abs(e.getY() - cy) < dp(30);
     }
 
-    private Drawable highlight(View v, DragEvent e) {
+    private Drawable highlight(View v, DragEvent e, int cell) {
+        String target = dragGrid.get(cell);
+        if (dragItem == null || dragItem.equals(target)) return null;
         GradientDrawable d = new GradientDrawable();
-        d.setCornerRadius(dp(16));
-        boolean merge = dragItem != null && dragItem.startsWith("a:") && overIcon(v, e);
-        d.setColor(merge ? 0x66FFFFFF : 0x26FFFFFF);
+        d.setCornerRadius(dp(18));
+        boolean merge = target != null && !dragItem.startsWith("f:") && overIcon(v, e);
+        d.setColor(merge ? 0x55FFFFFF : 0x22FFFFFF);
         return d;
     }
 
-    private void dropOn(String target, boolean merge) {
+    private void dropOn(int cell, boolean merge) {
         String src = dragItem;
         if (src == null) return;
-        if (src.equals(target)) {
-            dropOnSelf = true; // подержал и отпустил на месте — откроем меню
+        boolean fromList = src.startsWith("new:");
+        String item = fromList ? "a:" + src.substring(4) : src;
+        java.util.TreeMap<Integer, String> g = prefs.grid();
+        String target = g.get(cell);
+        if (item.equals(target)) {
+            if (!fromList) dropOnSelf = true; // подержал и отпустил на месте — меню
             return;
         }
-        List<String> h = prefs.home();
-        if (!h.contains(src)) return;
-        if (target == null) {
-            // Пустое место — в конец.
-            h.remove(src);
-            h.add(src);
-        } else if (merge && src.startsWith("a:")) {
-            String key = src.substring(2);
+        int from = -1;
+        for (Map.Entry<Integer, String> e : g.entrySet()) if (e.getValue().equals(item)) from = e.getKey();
+
+        if (target != null && merge && item.startsWith("a:")) {
+            String key = item.substring(2);
+            if (fromList) removeFromFolders(key);
+            g = prefs.grid();
+            if (from >= 0) g.remove(from);
             if (target.startsWith("f:")) {
                 String id = target.substring(2);
                 List<String> apps = prefs.folderApps(id);
                 if (!apps.contains(key)) apps.add(key);
                 prefs.setFolderApps(id, apps);
-                h.remove(src);
             } else {
-                // Иконка на иконку — новая папка на месте второй.
+                // Иконка на иконку — папка, как в Pixel Launcher.
                 String id = prefs.newFolderId();
                 prefs.setFolderName(id, "Папка");
                 List<String> apps = new ArrayList<>();
                 apps.add(target.substring(2));
                 apps.add(key);
                 prefs.setFolderApps(id, apps);
-                h.set(h.indexOf(target), "f:" + id);
-                h.remove(src);
-                toast("Папка создана. Подержи её и отпусти — можно переименовать.");
+                g.put(cell, "f:" + id);
             }
-        } else {
-            int from = h.indexOf(src);
-            int to = h.indexOf(target);
-            if (from < 0 || to < 0) return;
-            h.remove(from);
-            h.add(to, src);
+            prefs.setGrid(g);
+            return;
         }
-        prefs.setHome(h);
+
+        if (fromList && from < 0) {
+            if (g.size() >= Prefs.MAX_HOME) {
+                toast("На рабочем столе максимум " + Prefs.MAX_HOME + " приложений. Можно сложить в папку.");
+                return;
+            }
+            removeFromFolders(item.substring(2));
+            g = prefs.grid();
+            if (target != null) {
+                // Клетка занята — сдвигаем её жильца в ближайшую свободную.
+                int free = nearestFree(g, cell);
+                if (free < 0) return;
+                g.put(free, target);
+            }
+            g.put(cell, item);
+            prefs.setGrid(g);
+            return;
+        }
+
+        if (from < 0) return;
+        // Перенос по сетке: на пустую клетку — просто туда, на занятую — меняемся местами.
+        g.remove(from);
+        if (target != null) g.put(from, target);
+        g.put(cell, item);
+        prefs.setGrid(g);
+    }
+
+    private int nearestFree(java.util.TreeMap<Integer, String> g, int cell) {
+        int best = -1, bestDist = Integer.MAX_VALUE;
+        int r0 = cell / Prefs.COLS, c0 = cell % Prefs.COLS;
+        for (int i = 0; i < Prefs.CELLS; i++) {
+            if (g.containsKey(i)) continue;
+            int d = Math.abs(i / Prefs.COLS - r0) + Math.abs(i % Prefs.COLS - c0);
+            if (d < bestDist) { bestDist = d; best = i; }
+        }
+        return best;
     }
 
     private void removeDragged(String item) {
-        if (item == null) return;
+        if (item == null || item.startsWith("new:")) return;
         if (item.startsWith("a:")) {
             removeEverywhere(item.substring(2));
         } else if (item.startsWith("f:")) {
@@ -583,13 +676,21 @@ public class MainActivity extends Activity {
         if (dragItem == null) return;
         String item = dragItem;
         boolean menu = dropOnSelf;
+        // Из списка: подержал и отпустил, не двигая, — вернуть список и показать меню.
+        boolean listMenu = item.startsWith("new:") && dragMaxMove < dp(24);
         dragItem = null;
         dropOnSelf = false;
         removeZone.setVisibility(View.GONE);
-        // Перерисовываем после того, как система закончит рассылать события.
         main.post(() -> {
             renderHome();
             if (menu) showMenuFor(item);
+            if (listMenu) {
+                AppEntry app = byKey.get(item.substring(4));
+                if (app != null) {
+                    openDrawer();
+                    showDrawerAppMenu(app);
+                }
+            }
         });
     }
 
@@ -915,43 +1016,37 @@ public class MainActivity extends Activity {
             return false;
         }
         String item = "a:" + app.key;
-        List<String> h = prefs.home();
-        if (h.contains(item)) return true;
-        if (h.size() >= Prefs.MAX_HOME) {
-            toast("На рабочем столе максимум " + Prefs.MAX_HOME + " мест. Можно сложить в папку.");
+        if (prefs.cellOf(item) >= 0) return true;
+        if (prefs.grid().size() >= Prefs.MAX_HOME) {
+            toast("На рабочем столе максимум " + Prefs.MAX_HOME + " приложений. Можно сложить в папку.");
             return false;
         }
         removeFromFolders(app.key);
-        h = prefs.home();
-        h.add(item);
-        prefs.setHome(h);
+        if (!prefs.placeItem(item, -1)) {
+            toast("На рабочем столе нет свободного места");
+            return false;
+        }
         return true;
     }
 
     /** Убирает приложение и с рабочего стола, и из всех папок. */
     private void removeEverywhere(String key) {
-        List<String> h = prefs.home();
-        h.remove("a:" + key);
-        prefs.setHome(h);
+        prefs.removeItem("a:" + key);
         removeFromFolders(key);
     }
 
     private void removeFromFolders(String key) {
-        List<String> h = prefs.home();
-        boolean homeChanged = false;
         for (String id : prefs.folderIds()) {
             List<String> apps = prefs.folderApps(id);
             if (apps.remove(key)) {
                 if (apps.isEmpty()) {
-                    h.remove("f:" + id);
+                    prefs.removeItem("f:" + id);
                     prefs.deleteFolderData(id);
-                    homeChanged = true;
                 } else {
                     prefs.setFolderApps(id, apps);
                 }
             }
         }
-        if (homeChanged) prefs.setHome(h);
     }
 
     private void pickFolder(AppEntry app) {
@@ -987,19 +1082,17 @@ public class MainActivity extends Activity {
     }
 
     private void moveToNewFolder(AppEntry app, String name) {
-        List<String> h = prefs.home();
-        int idx = h.indexOf("a:" + app.key);
-        if (idx < 0 && h.size() >= Prefs.MAX_HOME) {
+        String item = "a:" + app.key;
+        boolean onHome = prefs.cellOf(item) >= 0;
+        if (!onHome && prefs.grid().size() >= Prefs.MAX_HOME) {
             toast("На рабочем столе нет места для новой папки");
             return;
         }
         String id = prefs.newFolderId();
         prefs.setFolderName(id, name);
         removeFromFolders(app.key);
-        h = prefs.home();
-        idx = h.indexOf("a:" + app.key);
-        if (idx >= 0) h.set(idx, "f:" + id); else h.add("f:" + id);
-        prefs.setHome(h);
+        if (prefs.cellOf(item) >= 0) prefs.replaceItem(item, "f:" + id);
+        else if (!prefs.placeItem("f:" + id, -1)) { toast("Нет свободного места"); return; }
         List<String> apps = new ArrayList<>();
         apps.add(app.key);
         prefs.setFolderApps(id, apps);
@@ -1007,16 +1100,17 @@ public class MainActivity extends Activity {
     }
 
     private void deleteFolder(String id) {
-        List<String> h = prefs.home();
-        int idx = h.indexOf("f:" + id);
-        if (idx < 0) return;
-        h.remove(idx);
-        int dropped = 0;
-        for (String key : prefs.folderApps(id)) {
-            if (h.size() < Prefs.MAX_HOME) h.add(idx++, "a:" + key); else dropped++;
-        }
-        prefs.setHome(h);
+        int cell = prefs.cellOf("f:" + id);
+        if (cell < 0) return;
+        List<String> apps = prefs.folderApps(id);
+        prefs.removeItem("f:" + id);
         prefs.deleteFolderData(id);
+        int dropped = 0;
+        boolean first = true;
+        for (String key : apps) {
+            if (!prefs.placeItem("a:" + key, first ? cell : -1)) dropped++;
+            first = false;
+        }
         if (dropped > 0) toast("Не поместилось: " + dropped + ". Они остались в списке приложений.");
         renderHome();
     }
