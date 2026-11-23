@@ -256,7 +256,7 @@ public class MainActivity extends Activity {
         home = new LinearLayout(this);
         home.setOrientation(LinearLayout.VERTICAL);
         home.setPadding(dp(16), dp(32), dp(16), dp(28));
-        home.setOnLongClickListener(v -> { showSettings(); return true; });
+        home.setOnLongClickListener(v -> { showHomePopup(); return true; });
 
         TextClock clock = new TextClock(this);
         clock.setFormat24Hour("HH:mm");
@@ -1239,23 +1239,23 @@ public class MainActivity extends Activity {
 
         if (!distracting) {
             if (onHome) {
-                m.add("Убрать с рабочего стола", () -> { removeEverywhere(app.key); renderHome(); });
+                m.add("✕   Убрать с рабочего стола", () -> { removeEverywhere(app.key); renderHome(); });
             } else if (folder != null) {
-                m.add("Убрать из папки «" + prefs.folderName(folder) + "»",
+                m.add("✕   Убрать из папки «" + prefs.folderName(folder) + "»",
                         () -> { removeEverywhere(app.key); renderHome(); });
             } else {
-                m.add("На рабочий стол", () -> { addToHome(app); renderHome(); });
+                m.add("📌   На рабочий стол", () -> { addToHome(app); renderHome(); });
             }
-            m.add("В папку…", () -> pickFolder(app));
+            m.add("📁   В папку…", () -> pickFolder(app));
         }
-        m.add(distracting ? "Отвлекающее: да (снять отметку)" : "Отметить как отвлекающее (пауза 20 сек)",
+        m.add(distracting ? "⏳   Отвлекающее: да (снять отметку)" : "⏳   Отметить как отвлекающее (пауза 20 сек)",
                 () -> setDistracting(pkg, !distracting));
         boolean hidden = prefs.hidden().contains(app.key);
-        m.add(hidden ? "Показывать в списке" : "Скрыть из списка",
+        m.add(hidden ? "👁   Показывать в списке" : "🙈   Скрыть из списка",
                 () -> { prefs.setHidden(app.key, !hidden); onQueryChanged(); });
         addCommon(m, app);
         if (!app.workProfile) {
-            m.add("Удалить", () -> safeStart(new Intent(Intent.ACTION_DELETE,
+            m.add("🗑   Удалить приложение", () -> safeStart(new Intent(Intent.ACTION_DELETE,
                     Uri.fromParts("package", pkg, null))));
         }
         m.show(app.label);
@@ -1263,36 +1263,36 @@ public class MainActivity extends Activity {
 
     private void showHomeAppMenu(AppEntry app) {
         Menu m = new Menu();
-        m.add("Убрать с рабочего стола", () -> { removeEverywhere(app.key); renderHome(); });
-        m.add("В папку…", () -> pickFolder(app));
+        m.add("✕   Убрать с рабочего стола", () -> { removeEverywhere(app.key); renderHome(); });
+        m.add("📁   В папку…", () -> pickFolder(app));
         addCommon(m, app);
         m.show(app.label);
     }
 
     private void showFolderAppMenu(AppEntry app) {
         Menu m = new Menu();
-        m.add("Вынуть из папки на рабочий стол", () -> {
+        m.add("📤   Вынуть из папки на рабочий стол", () -> {
             removeFromFolders(app.key);
             if (!addToHome(app)) toast("Приложение осталось в общем списке");
             renderHome();
         });
-        m.add("В другую папку…", () -> pickFolder(app));
+        m.add("📁   В другую папку…", () -> pickFolder(app));
         addCommon(m, app);
         m.show(app.label);
     }
 
     private void showFolderMenu(String id) {
         Menu m = new Menu();
-        m.add("Открыть", () -> openFolder(id));
-        m.add("Переименовать папку", () -> askText("Название папки", prefs.folderName(id),
+        m.add("📂   Открыть", () -> openFolder(id));
+        m.add("✏️   Переименовать папку", () -> askText("Название папки", prefs.folderName(id),
                 name -> { prefs.setFolderName(id, name); renderHome(); }));
-        m.add("Удалить папку (приложения вернутся на стол)", () -> deleteFolder(id));
+        m.add("🗑   Удалить папку (приложения вернутся на стол)", () -> deleteFolder(id));
         m.show(prefs.folderName(id));
     }
 
     private void addCommon(Menu m, AppEntry app) {
-        m.add("Переименовать", () -> showRename(app));
-        m.add("О приложении", () -> {
+        m.add("✏️   Переименовать", () -> showRename(app));
+        m.add("ℹ️   О приложении", () -> {
             try {
                 launcherApps.startAppDetailsActivity(app.component, app.user, null, null);
             } catch (Exception e) {
@@ -1359,30 +1359,89 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------------ settings
 
+    /** Долгое нажатие на пустом месте: панель снизу из трёх плиток, как в Pixel Launcher. */
+    private void showHomePopup() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(8), dp(16), dp(8), dp(16));
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setView(row)
+                .create();
+        row.addView(popupTile("🎨", "Обои и стиль", () -> { dialog.dismiss(); showStyleSettings(); }),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(popupTile("🧩", "Виджеты", () -> { dialog.dismiss(); showWidgetSettings(); }),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(popupTile("⚙️", "Настройки", () -> { dialog.dismiss(); showSettings(); }),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        dialog.show();
+        if (dialog.getWindow() != null) dialog.getWindow().setGravity(Gravity.BOTTOM);
+    }
+
+    private View popupTile(String icon, String label, Runnable action) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(Gravity.CENTER_HORIZONTAL);
+        tile.setPadding(dp(4), dp(12), dp(4), dp(12));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0x1FFFFFFF);
+        bg.setCornerRadius(dp(20));
+        TextView ic = new TextView(this);
+        ic.setText(icon);
+        ic.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
+        ic.setGravity(Gravity.CENTER);
+        ic.setBackground(bg);
+        tile.addView(ic, new LinearLayout.LayoutParams(dp(64), dp(64)));
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tv.setTextColor(TEXT);
+        tv.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        tile.addView(tv, lp);
+        tile.setOnClickListener(v -> action.run());
+        return tile;
+    }
+
+    private void showStyleSettings() {
+        Menu m = new Menu();
+        m.add("🖼   Сменить обои", () -> safeStart(Intent.createChooser(
+                new Intent(Intent.ACTION_SET_WALLPAPER), "Обои")));
+        m.add("🌑   Фон: " + (prefs.blackTheme() ? "чёрный (OLED)" : "обои"), () -> {
+            prefs.setBlackTheme(!prefs.blackTheme()); applyTheme(); showStyleSettings();
+        });
+        m.add("🎨   Иконки: " + (prefs.grayIcons() ? "чёрно-белые" : "цветные"), () -> {
+            prefs.setGrayIcons(!prefs.grayIcons()); renderHome(); showStyleSettings();
+        });
+        m.add("📅   Показывать дату: " + onOff(prefs.showDate()), () -> {
+            prefs.setShowDate(!prefs.showDate()); applyTheme(); showStyleSettings();
+        });
+        m.show("Обои и стиль");
+    }
+
+    private void showWidgetSettings() {
+        Menu m = new Menu();
+        m.add("➕   Добавить виджет", this::pickWidget);
+        if (!prefs.widgets().isEmpty()) m.add("➖   Убрать виджет", this::removeWidgetDialog);
+        m.show("Виджеты");
+    }
+
     private void showSettings() {
         boolean night = Guard.nightActive(prefs);
         boolean video = Guard.videoActive(prefs);
         Menu m = new Menu();
-        m.add("Фон: " + (prefs.blackTheme() ? "чёрный (OLED)" : "обои"), () -> {
-            prefs.setBlackTheme(!prefs.blackTheme()); applyTheme(); showSettings();
-        });
-        m.add("Иконки: " + (prefs.grayIcons() ? "чёрно-белые" : "цветные"), () -> {
-            prefs.setGrayIcons(!prefs.grayIcons()); renderHome(); showSettings();
-        });
-        m.add("Добавить виджет", this::pickWidget);
-        if (!prefs.widgets().isEmpty()) m.add("Убрать виджет", this::removeWidgetDialog);
-
-        m.add("Отвлекающие приложения (" + countPackages(prefs.distracting()) + ") — пауза "
+        m.add("⏳   Отвлекающие приложения (" + countPackages(prefs.distracting()) + ") — пауза "
                 + Guard.DELAY_SECONDS + " сек", this::editDistracting);
 
         String videoState;
         if (!video) videoState = "выкл";
         else if (prefs.videoUnblockAt() > 0) videoState = "вкл, выключится в 9:00";
         else videoState = "вкл";
-        m.add("Блок видео и браузеров: " + videoState, this::toggleVideoBlock);
-        m.add("Что блокировать как видео (" + countPackages(prefs.videoApps()) + ")", this::editVideoApps);
+        m.add("🚫   Блок видео и браузеров: " + videoState, this::toggleVideoBlock);
+        m.add("🎬   Что блокировать как видео (" + countPackages(prefs.videoApps()) + ")", this::editVideoApps);
 
-        m.add("Ночной режим " + Guard.NIGHT_START_HOUR + ":00–" + Guard.NIGHT_END_HOUR + ":00: "
+        m.add("🌙   Ночной режим " + Guard.NIGHT_START_HOUR + ":00–" + Guard.NIGHT_END_HOUR + ":00: "
                 + onOff(prefs.nightMode()) + (night ? " (сейчас ночь)" : ""), () -> {
             if (prefs.nightMode() && night) {
                 toast("Ночью выключить нельзя. До 9:00.");
@@ -1392,24 +1451,19 @@ public class MainActivity extends Activity {
             updateGuards(true);
             showSettings();
         });
-        m.add("Разрешено ночью (" + countPackages(prefs.nightAllowed()) + " + звонки и будильник)",
+        m.add("📖   Разрешено ночью (" + countPackages(prefs.nightAllowed()) + " + звонки и будильник)",
                 this::editNightAllowed);
 
-        m.add("Клавиатура при открытии списка: " + onOff(prefs.showKeyboard()), () -> {
+        m.add("⌨️   Клавиатура при открытии списка: " + onOff(prefs.showKeyboard()), () -> {
             prefs.setShowKeyboard(!prefs.showKeyboard()); showSettings();
         });
-        m.add("Автозапуск при одном совпадении: " + onOff(prefs.autoLaunch()), () -> {
+        m.add("⚡   Автозапуск при одном совпадении: " + onOff(prefs.autoLaunch()), () -> {
             prefs.setAutoLaunch(!prefs.autoLaunch()); showSettings();
         });
-        m.add("Показывать дату: " + onOff(prefs.showDate()), () -> {
-            prefs.setShowDate(!prefs.showDate()); applyTheme(); showSettings();
-        });
-        m.add("Скрытые приложения (" + countHidden() + ")", this::showHiddenApps);
-        m.add("Сменить обои", () -> safeStart(Intent.createChooser(
-                new Intent(Intent.ACTION_SET_WALLPAPER), "Обои")));
-        m.add("Сделать лаунчером по умолчанию", this::requestDefaultLauncher);
-        m.add("Настройки Android", () -> safeStart(new Intent(Settings.ACTION_SETTINGS)));
-        m.show("Mini Launcher");
+        m.add("🙈   Скрытые приложения (" + countHidden() + ")", this::showHiddenApps);
+        m.add("🏠   Сделать лаунчером по умолчанию", this::requestDefaultLauncher);
+        m.add("🔧   Настройки Android", () -> safeStart(new Intent(Settings.ACTION_SETTINGS)));
+        m.show("Настройки");
     }
 
     private void toggleVideoBlock() {
