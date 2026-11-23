@@ -134,6 +134,10 @@ public class MainActivity extends Activity {
     private java.util.TreeMap<Integer, String> dragGrid = new java.util.TreeMap<>();
     private TextView removeZone;
     private TextView emptyHint;
+    /** Открытая сейчас папка (для перетаскивания внутри неё). */
+    private String openFolderId;
+    private AlertDialog openFolderDialog;
+    private boolean folderReordered;
     private boolean lastVideo;
 
     // ------------------------------------------------------------------ lifecycle
@@ -504,6 +508,7 @@ public class MainActivity extends Activity {
         } else {
             dragItem = null;
             removeZone.setVisibility(View.GONE);
+            if (openFolderDialog != null) openFolderDialog.dismiss();
             showMenuFor(item);
         }
     }
@@ -572,6 +577,10 @@ public class MainActivity extends Activity {
                 case DragEvent.ACTION_DRAG_ENTERED:
                 case DragEvent.ACTION_DRAG_LOCATION:
                     trackMove(v, e);
+                    // Палец ушёл за окно папки — закрываем её, дальше тащим по рабочему столу.
+                    if (openFolderDialog != null && dragItem != null && dragItem.startsWith("fold:")) {
+                        openFolderDialog.dismiss();
+                    }
                     v.setBackground(highlight(v, e, cell));
                     return true;
                 case DragEvent.ACTION_DRAG_EXITED:
@@ -609,6 +618,10 @@ public class MainActivity extends Activity {
     private void dropOn(int cell, boolean merge) {
         String src = dragItem;
         if (src == null) return;
+        if (src.startsWith("fold:")) {
+            dropFromFolder(src, cell, merge);
+            return;
+        }
         boolean fromList = src.startsWith("new:");
         // Из списка: подержал и отпустил на месте — это не перенос, а меню (см. onDragFinished).
         if (fromList && dragMaxMove < dp(24)) return;
@@ -672,6 +685,54 @@ public class MainActivity extends Activity {
         prefs.setGrid(g);
     }
 
+    /** Иконку вынесли из папки на рабочий стол (в клетку, на иконку или в другую папку). */
+    private void dropFromFolder(String src, int cell, boolean merge) {
+        if (dragMaxMove < dp(24)) return;
+        String rest = src.substring(5);
+        int colon = rest.indexOf(':');
+        String fid = rest.substring(0, colon);
+        String key = rest.substring(colon + 1);
+        java.util.TreeMap<Integer, String> g = prefs.grid();
+        String target = g.get(cell);
+        if (("f:" + fid).equals(target)) return; // вернули в ту же папку
+        List<String> apps = prefs.folderApps(fid);
+        boolean folderVanishes = apps.size() <= 1;
+
+        int dest = -1;
+        if (!(target != null && merge)) {
+            dest = target == null ? cell : nearestFree(g, cell);
+            if (dest < 0 || (!folderVanishes && g.size() >= Prefs.MAX_HOME)) {
+                toast("На рабочем столе нет места");
+                return;
+            }
+        }
+        // Достаём из старой папки (пустая папка исчезает).
+        apps.remove(key);
+        if (apps.isEmpty()) {
+            g.values().removeIf(("f:" + fid)::equals);
+            prefs.deleteFolderData(fid);
+        } else {
+            prefs.setFolderApps(fid, apps);
+        }
+        if (dest >= 0) {
+            g.put(dest, "a:" + key);
+        } else if (target.startsWith("f:")) {
+            String tid = target.substring(2);
+            List<String> other = prefs.folderApps(tid);
+            if (!other.contains(key)) other.add(key);
+            prefs.setFolderApps(tid, other);
+        } else {
+            String id = prefs.newFolderId();
+            prefs.setFolderName(id, "Папка");
+            List<String> both = new ArrayList<>();
+            both.add(target.substring(2));
+            both.add(key);
+            prefs.setFolderApps(id, both);
+            g.put(cell, "f:" + id);
+        }
+        prefs.setGrid(g);
+    }
+
     private int nearestFree(java.util.TreeMap<Integer, String> g, int cell) {
         int best = -1, bestDist = Integer.MAX_VALUE;
         int r0 = cell / Prefs.COLS, c0 = cell % Prefs.COLS;
@@ -685,6 +746,10 @@ public class MainActivity extends Activity {
 
     private void removeDragged(String item) {
         if (item == null || item.startsWith("new:")) return;
+        if (item.startsWith("fold:")) {
+            removeFromFolders(item.substring(item.indexOf(':', 5) + 1));
+            return;
+        }
         if (item.startsWith("a:")) {
             removeEverywhere(item.substring(2));
         } else if (item.startsWith("f:")) {
@@ -699,12 +764,18 @@ public class MainActivity extends Activity {
         boolean menu = dropOnSelf;
         // Из списка: подержал и отпустил, не двигая, — вернуть список и показать меню.
         boolean listMenu = item.startsWith("new:") && dragMaxMove < dp(24);
+        boolean fromFolder = item.startsWith("fold:");
+        boolean reopen = fromFolder && !menu && (folderReordered || !dropDone);
+        String folderToReopen = openFolderId;
+        folderReordered = false;
         dragItem = null;
         dropOnSelf = false;
         removeZone.setVisibility(View.GONE);
+        if (fromFolder && openFolderDialog != null) openFolderDialog.dismiss();
         main.post(() -> {
             renderHome();
             if (menu) showMenuFor(item);
+            if (reopen && folderToReopen != null) openFolder(folderToReopen);
             if (listMenu) {
                 AppEntry app = byKey.get(item.substring(4));
                 if (app != null) {
@@ -721,6 +792,9 @@ public class MainActivity extends Activity {
             if (app != null) showHomeAppMenu(app);
         } else if (item.startsWith("f:")) {
             showFolderMenu(item.substring(2));
+        } else if (item.startsWith("fold:")) {
+            AppEntry app = byKey.get(item.substring(item.indexOf(':', 5) + 1));
+            if (app != null) showFolderAppMenu(app);
         }
     }
 
@@ -753,8 +827,7 @@ public class MainActivity extends Activity {
         });
         cell.setOnLongClickListener(v -> {
             if (folderDialog != null) {
-                folderDialog.dismiss();
-                showFolderAppMenu(app);
+                startDrag("fold:" + openFolderId + ":" + app.key, cell, iv);
             } else {
                 startDrag("a:" + app.key, cell, iv);
             }
@@ -892,9 +965,77 @@ public class MainActivity extends Activity {
                 .setView(scroll)
                 .create();
         List<View> cells = new ArrayList<>();
-        for (AppEntry a : apps) cells.add(appCell(a, dialog));
+        for (AppEntry a : apps) {
+            View cell = appCell(a, dialog);
+            cell.setOnDragListener(new FolderDrag(id, a.key));
+            cells.add(cell);
+        }
         addRows(content, cells);
+        openFolderId = id;
+        openFolderDialog = dialog;
+        dialog.setOnDismissListener(d -> { if (openFolderDialog == dialog) openFolderDialog = null; });
         dialog.show();
+    }
+
+    /** Перетаскивание внутри открытой папки: бросил на другую иконку — встал на её место. */
+    private final class FolderDrag implements View.OnDragListener {
+        private final String folderId;
+        private final String key;
+
+        FolderDrag(String folderId, String key) {
+            this.folderId = folderId;
+            this.key = key;
+        }
+
+        @Override
+        public boolean onDrag(View v, DragEvent e) {
+            switch (e.getAction()) {
+                case DragEvent.ACTION_DRAG_STARTED:
+                    return dragItem != null && dragItem.startsWith("fold:" + folderId + ":");
+                case DragEvent.ACTION_DRAG_ENTERED:
+                case DragEvent.ACTION_DRAG_LOCATION: {
+                    trackMove(v, e);
+                    boolean self = dragItem != null && dragItem.endsWith(":" + key);
+                    if (self) {
+                        v.setBackground(null);
+                    } else {
+                        GradientDrawable d = new GradientDrawable();
+                        d.setCornerRadius(dp(18));
+                        d.setColor(0x22FFFFFF);
+                        v.setBackground(d);
+                    }
+                    return true;
+                }
+                case DragEvent.ACTION_DRAG_EXITED:
+                case DragEvent.ACTION_DRAG_ENDED:
+                    v.setBackground(null);
+                    return true;
+                case DragEvent.ACTION_DROP: {
+                    trackMove(v, e);
+                    v.setBackground(null);
+                    dropDone = true;
+                    String src = dragItem;
+                    if (src == null) return true;
+                    String moving = src.substring(src.indexOf(':', 5) + 1);
+                    if (moving.equals(key)) {
+                        if (dragMaxMove < dp(24)) dropOnSelf = true;
+                        return true;
+                    }
+                    List<String> apps = prefs.folderApps(folderId);
+                    int from = apps.indexOf(moving);
+                    int to = apps.indexOf(key);
+                    if (from >= 0 && to >= 0) {
+                        apps.remove(from);
+                        apps.add(to, moving);
+                        prefs.setFolderApps(folderId, apps);
+                        folderReordered = true;
+                    }
+                    return true;
+                }
+                default:
+                    return true;
+            }
+        }
     }
 
     // ------------------------------------------------------------------ apps
