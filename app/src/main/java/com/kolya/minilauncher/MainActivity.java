@@ -403,13 +403,8 @@ public class MainActivity extends Activity {
         home.setOnDragListener((v, e) -> {
             switch (e.getAction()) {
                 case DragEvent.ACTION_DRAG_STARTED:
-                    dragStartX = e.getX();
-                    dragStartY = e.getY();
-                    dragMaxMove = 0f;
-                    return true;
                 case DragEvent.ACTION_DRAG_LOCATION:
-                    dragMaxMove = Math.max(dragMaxMove,
-                            Math.abs(e.getX() - dragStartX) + Math.abs(e.getY() - dragStartY));
+                    trackMove(v, e);
                     return true;
                 case DragEvent.ACTION_DRAG_ENDED:
                     onDragFinished();
@@ -496,6 +491,7 @@ public class MainActivity extends Activity {
 
     private void startDrag(String item, View cell, View icon) {
         dragItem = item;
+        resetMove();
         dragGrid = prefs.grid();
         dropOnSelf = false;
         dropDone = false;
@@ -522,6 +518,7 @@ public class MainActivity extends Activity {
         View icon = row instanceof ViewGroup && ((ViewGroup) row).getChildCount() > 0
                 ? ((ViewGroup) row).getChildAt(0) : row;
         dragItem = "new:" + app.key;
+        resetMove();
         dragGrid = prefs.grid();
         dropOnSelf = false;
         dropDone = false;
@@ -541,6 +538,26 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void resetMove() {
+        dragStartX = Float.NaN;
+        dragStartY = Float.NaN;
+        dragMaxMove = 0f;
+    }
+
+    /** Сколько палец прошёл за перетаскивание (в координатах экрана, с любой клетки). */
+    private void trackMove(View v, DragEvent e) {
+        int[] loc = new int[2];
+        v.getLocationOnScreen(loc);
+        float x = loc[0] + e.getX();
+        float y = loc[1] + e.getY();
+        if (Float.isNaN(dragStartX)) {
+            dragStartX = x;
+            dragStartY = y;
+        } else {
+            dragMaxMove = Math.max(dragMaxMove, Math.abs(x - dragStartX) + Math.abs(y - dragStartY));
+        }
+    }
+
     /** Подсветка и приём «броска» на клетку сетки. */
     private final class SlotDrag implements View.OnDragListener {
         private final int cell;
@@ -554,6 +571,7 @@ public class MainActivity extends Activity {
                     return dragItem != null;
                 case DragEvent.ACTION_DRAG_ENTERED:
                 case DragEvent.ACTION_DRAG_LOCATION:
+                    trackMove(v, e);
                     v.setBackground(highlight(v, e, cell));
                     return true;
                 case DragEvent.ACTION_DRAG_EXITED:
@@ -561,6 +579,7 @@ public class MainActivity extends Activity {
                     v.setBackground(null);
                     return true;
                 case DragEvent.ACTION_DROP:
+                    trackMove(v, e);
                     v.setBackground(null);
                     dropDone = true;
                     dropOn(cell, overIcon(v, e));
@@ -591,6 +610,8 @@ public class MainActivity extends Activity {
         String src = dragItem;
         if (src == null) return;
         boolean fromList = src.startsWith("new:");
+        // Из списка: подержал и отпустил на месте — это не перенос, а меню (см. onDragFinished).
+        if (fromList && dragMaxMove < dp(24)) return;
         String item = fromList ? "a:" + src.substring(4) : src;
         java.util.TreeMap<Integer, String> g = prefs.grid();
         String target = g.get(cell);
