@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Сознательно НЕТ разрешения INTERNET: лаунчер полностью офлайновый. -->
 
@@ -7,6 +8,12 @@
     <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
     <!-- Пункт «Удалить» в меню приложения -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+
+    <!-- Чёрно-белый экран всего телефона. Выдаётся один раз вручную:
+         adb shell pm grant com.kolya.minilauncher android.permission.WRITE_SECURE_SETTINGS -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Видимость пакетов (Android 11+): только приложения с иконкой в меню -->
     <queries>
