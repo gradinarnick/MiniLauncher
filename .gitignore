@@ -5,3 +5,8 @@ local.properties
 *.iml
 captures/
 .DS_Store
+
+# Ключ подписи — только локально и в секретах GitHub
+signing/
+*.p12
+*.jks
