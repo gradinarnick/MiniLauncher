@@ -41,7 +41,7 @@ final class AppRepository {
                 CharSequence l = info.getLabel();
                 String label = l == null ? info.getComponentName().getPackageName() : l.toString().trim();
                 String key = info.getComponentName().flattenToShortString() + "#" + serial;
-                result.add(new AppEntry(key, label, info.getComponentName(), user, work));
+                result.add(new AppEntry(key, label, info.getComponentName(), user, work, info));
             }
         }
         applyNames(result, prefs);
