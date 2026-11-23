@@ -229,6 +229,26 @@ final class Prefs {
     boolean biblePresetDone() { return sp.getBoolean(K_BIBLE_PRESET, false); }
     void setBiblePresetDone() { sp.edit().putBoolean(K_BIBLE_PRESET, true).apply(); }
 
+    // ---- Настройки фокуса (ослабить — только через задержку 30 сек) ----
+    private static final String K_PAUSE = "pause_seconds";
+    private static final String K_NIGHT_START = "night_start_min";
+    private static final String K_NIGHT_END = "night_end_min";
+    private static final String K_GRAYSCALE = "grayscale_phone";
+
+    int pauseSeconds() { return sp.getInt(K_PAUSE, 20); }
+    void setPauseSeconds(int v) { sp.edit().putInt(K_PAUSE, Math.max(1, Math.min(600, v))).apply(); }
+
+    /** Начало и конец ночного режима, минуты от полуночи (по умолчанию 20:00–9:00). */
+    int nightStart() { return sp.getInt(K_NIGHT_START, 20 * 60); }
+    int nightEnd() { return sp.getInt(K_NIGHT_END, 9 * 60); }
+    void setNightHours(int start, int end) {
+        sp.edit().putInt(K_NIGHT_START, start).putInt(K_NIGHT_END, end).apply();
+    }
+
+    /** Весь телефон чёрно-белый (системная функция, лаунчер держит её включённой). */
+    boolean grayscale() { return sp.getBoolean(K_GRAYSCALE, true); }
+    void setGrayscale(boolean v) { sp.edit().putBoolean(K_GRAYSCALE, v).apply(); }
+
     // ---- Флаги ----
     boolean blackTheme() { return sp.getBoolean(K_BLACK, false); }
     void setBlackTheme(boolean v) { sp.edit().putBoolean(K_BLACK, v).apply(); }
