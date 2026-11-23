@@ -2,6 +2,13 @@ plugins {
     id("com.android.application")
 }
 
+// Номер сборки GitHub Actions — он же номер версии: каждая сборка новее предыдущей,
+// поэтому Obtainium на телефоне видит обновление и ставит его.
+val buildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+// Постоянный ключ подписи (в CI приходит из секрета SIGNING_KEYSTORE_BASE64).
+// Локально можно указать путь к signing/minilauncher.p12 в переменной SIGNING_KEYSTORE_FILE.
+val releaseKeystore = System.getenv("SIGNING_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
+
 android {
     namespace = "com.kolya.minilauncher"
     compileSdk = 37
@@ -10,8 +17,21 @@ android {
         applicationId = "com.kolya.minilauncher"
         minSdk = 30
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = buildNumber
+        versionName = "1.0.$buildNumber"
+    }
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storeType = "pkcs12"
+                // Пароль открытый: секрет — сам файл ключа.
+                storePassword = "minilauncher"
+                keyAlias = "minilauncher"
+                keyPassword = "minilauncher"
+            }
+        }
     }
 
     buildTypes {
@@ -19,9 +39,9 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-            // Для личного использования релиз подписывается debug-ключом.
-            // Для публикации замените на свой signingConfig.
-            signingConfig = signingConfigs.getByName("debug")
+            // Без ключа (локальная сборка) — debug-подпись; такой APK не обновит версию с телефона.
+            signingConfig = if (releaseKeystore != null) signingConfigs.getByName("release")
+                            else signingConfigs.getByName("debug")
         }
     }
 
