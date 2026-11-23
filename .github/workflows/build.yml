@@ -41,7 +41,17 @@ jobs:
           echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/minilauncher.p12" >> "$GITHUB_ENV"
 
       - name: Build debug and release APK
-        run: gradle --no-daemon assembleDebug assembleRelease
+        # Без кэшей: релиз всегда собирается заново и подписывается постоянным ключом.
+        run: gradle --no-daemon --no-build-cache --no-configuration-cache --rerun-tasks assembleDebug assembleRelease
+
+      - name: Проверить подпись (иначе телефон не примет обновление)
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/release/app-release.apk | tee signers.txt
+          if ! grep -qi "61cdd8e68965f598c7a007b86526bb66f48095146239c7821b453b7c504450aa" signers.txt; then
+            echo "::error::APK подписан не постоянным ключом — релиз не публикуем"
+            exit 1
+          fi
 
       - name: Подготовить APK к релизу
         run: cp app/build/outputs/apk/release/app-release.apk "MiniLauncher-1.0.${{ github.run_number }}.apk"
