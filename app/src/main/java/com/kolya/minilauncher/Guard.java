@@ -17,15 +17,17 @@ import java.util.Set;
 
 /**
  * Правила против постоянного залипания в телефоне:
- *  - отвлекающие приложения открываются только после паузы 20 секунд и не ставятся на рабочий стол;
- *  - ночной режим 20:00–9:00: доступны только звонки, будильник и разрешённые приложения (Библия);
- *    выключить его ночью нельзя;
- *  - блок видео и браузеров: включается сразу, а выключается только в ближайшие 9:00.
+ *  - отвлекающие приложения открываются только после паузы (длительность настраивается)
+ *    и не ставятся на рабочий стол;
+ *  - ночной режим (время настраивается, по умолчанию 20:00–9:00): доступны только звонки,
+ *    будильник и разрешённые приложения (Библия); выключить его ночью нельзя;
+ *  - блок видео и браузеров: включается сразу, а выключается только в конце ночного режима;
+ *  - весь телефон чёрно-белый: лаунчер держит системную функцию включённой
+ *    (нужно разрешение WRITE_SECURE_SETTINGS, выдаётся один раз через adb).
  */
 final class Guard {
-    static final int NIGHT_START_HOUR = 20;
-    static final int NIGHT_END_HOUR = 9;
-    static final int DELAY_SECONDS = 20;
+    /** Задержка перед любым ослаблением ограничений. */
+    static final int LOOSEN_DELAY_SECONDS = 30;
 
     /** Видеоприложения и соцсети с видео. Браузеры определяются автоматически. */
     private static final Set<String> KNOWN_VIDEO = new HashSet<>(Arrays.asList(
@@ -87,27 +89,81 @@ final class Guard {
 
     // ------------------------------------------------------------------ время
 
-    static boolean isNight(long now) {
+    static boolean isNight(Prefs prefs, long now) {
         Calendar c = Calendar.getInstance();
         c.setTimeInMillis(now);
-        int h = c.get(Calendar.HOUR_OF_DAY);
-        return h >= NIGHT_START_HOUR || h < NIGHT_END_HOUR;
+        int m = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
+        int start = prefs.nightStart();
+        int end = prefs.nightEnd();
+        if (start == end) return false;
+        return start < end ? (m >= start && m < end) : (m >= start || m < end);
     }
 
-    /** Ближайшие 9:00 строго после now. */
-    static long nextMorning(long now) {
+    /** Ближайший конец ночного режима строго после now. */
+    static long nextMorning(Prefs prefs, long now) {
         Calendar c = Calendar.getInstance();
         c.setTimeInMillis(now);
-        c.set(Calendar.HOUR_OF_DAY, NIGHT_END_HOUR);
-        c.set(Calendar.MINUTE, 0);
+        c.set(Calendar.HOUR_OF_DAY, prefs.nightEnd() / 60);
+        c.set(Calendar.MINUTE, prefs.nightEnd() % 60);
         c.set(Calendar.SECOND, 0);
         c.set(Calendar.MILLISECOND, 0);
         if (c.getTimeInMillis() <= now) c.add(Calendar.DAY_OF_YEAR, 1);
         return c.getTimeInMillis();
     }
 
+    static String hhmm(int minutes) {
+        return String.format(Locale.ROOT, "%d:%02d", minutes / 60, minutes % 60);
+    }
+
+    static String nightEndText(Prefs prefs) {
+        return hhmm(prefs.nightEnd());
+    }
+
+    static String nightRangeText(Prefs prefs) {
+        return hhmm(prefs.nightStart()) + "–" + hhmm(prefs.nightEnd());
+    }
+
     static boolean nightActive(Prefs prefs) {
-        return prefs.nightMode() && isNight(System.currentTimeMillis());
+        return prefs.nightMode() && isNight(prefs, System.currentTimeMillis());
+    }
+
+    // ------------------------------------------------------------------ чёрно-белый телефон
+
+    private static final String DALTONIZER_ENABLED = "accessibility_display_daltonizer_enabled";
+    private static final String DALTONIZER_MODE = "accessibility_display_daltonizer";
+    private static final int MODE_MONOCHROME = 0;
+
+    /** Выдано ли разрешение менять системные настройки (adb shell pm grant …). */
+    static boolean canControlGrayscale(Context ctx) {
+        return ctx.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS")
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    static boolean isPhoneGrayscale(Context ctx) {
+        try {
+            android.content.ContentResolver cr = ctx.getContentResolver();
+            return android.provider.Settings.Secure.getInt(cr, DALTONIZER_ENABLED, 0) == 1
+                    && android.provider.Settings.Secure.getInt(cr, DALTONIZER_MODE, -1) == MODE_MONOCHROME;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Если чёрно-белый режим положен — включает его (в том числе после выключения в обход). */
+    static void enforceGrayscale(Context ctx, Prefs prefs) {
+        if (!prefs.grayscale() || !canControlGrayscale(ctx)) return;
+        if (isPhoneGrayscale(ctx)) return;
+        setPhoneGrayscale(ctx, true);
+    }
+
+    static void setPhoneGrayscale(Context ctx, boolean on) {
+        try {
+            android.content.ContentResolver cr = ctx.getContentResolver();
+            if (on) android.provider.Settings.Secure.putInt(cr, DALTONIZER_MODE, MODE_MONOCHROME);
+            android.provider.Settings.Secure.putInt(cr, DALTONIZER_ENABLED, on ? 1 : 0);
+        } catch (Exception ignored) {
+            // Нет разрешения — ничего не делаем.
+        }
     }
 
     /** Действует ли блок видео прямо сейчас (и снимает его, если наступило время). */
@@ -150,10 +206,10 @@ final class Guard {
     /** @return текст причины блокировки или null, если приложение можно открыть. */
     static String blockReason(Prefs prefs, String pkg) {
         if (nightActive(prefs) && !allowedAtNight(prefs, pkg)) {
-            return "Ночной режим до 9:00.\nСейчас доступны только звонки, будильник и Библия.";
+            return "Ночной режим до " + nightEndText(prefs) + ".\nСейчас доступны только звонки, будильник и Библия.";
         }
         if (videoActive(prefs) && prefs.videoApps().contains(pkg)) {
-            String when = prefs.videoUnblockAt() > 0 ? " до 9:00" : "";
+            String when = prefs.videoUnblockAt() > 0 ? " до " + nightEndText(prefs) : "";
             return "Видео и браузеры заблокированы" + when + ".\nВидео можно смотреть только в Telegram.";
         }
         return null;
