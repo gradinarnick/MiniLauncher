@@ -199,6 +199,7 @@ public class MainActivity extends Activity {
         super.onResume();
         if (dragItem == null) hideRemoveZone();
         Guard.refreshSystemApps(this);
+        Guard.enforceGrayscale(this, prefs);
         reloadApps();
         updateGuards(true);
         maybeAskDefaultLauncher();
@@ -280,7 +281,7 @@ public class MainActivity extends Activity {
         style(dateView, 18, TEXT_DIM);
         dateView.setPadding(dp(8), 0, dp(8), 0);
         dateView.setOnClickListener(v -> {
-            if (Guard.nightActive(prefs)) { toast("Ночной режим до 9:00"); return; }
+            if (Guard.nightActive(prefs)) { toast("Ночной режим до " + Guard.nightEndText(prefs)); return; }
             safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR));
         });
         home.addView(dateView, wrap());
@@ -434,9 +435,9 @@ public class MainActivity extends Activity {
 
     private void updateStatus() {
         List<String> parts = new ArrayList<>();
-        if (Guard.nightActive(prefs)) parts.add("🌙 Ночной режим до 9:00");
+        if (Guard.nightActive(prefs)) parts.add("🌙 Ночной режим до " + Guard.nightEndText(prefs));
         if (Guard.videoActive(prefs)) {
-            parts.add(prefs.videoUnblockAt() > 0 ? "Видео заблокировано до 9:00" : "Видео заблокировано");
+            parts.add(prefs.videoUnblockAt() > 0 ? "Видео заблокировано до " + Guard.nightEndText(prefs) : "Видео заблокировано");
         }
         statusLine.setText(TextUtils.join(" · ", parts));
         statusLine.setVisibility(parts.isEmpty() ? View.GONE : View.VISIBLE);
@@ -948,7 +949,8 @@ public class MainActivity extends Activity {
     }
 
     private void applyIconFilter(ImageView iv) {
-        if (prefs.grayIcons()) {
+        // Чёрно-белый режим: иконки серые всегда (даже пока нет разрешения на весь телефон).
+        if (prefs.grayIcons() || prefs.grayscale()) {
             ColorMatrix m = new ColorMatrix();
             m.setSaturation(0f);
             iv.setColorFilter(new ColorMatrixColorFilter(m));
@@ -1145,14 +1147,14 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Пауза 20 секунд перед открытием отвлекающего приложения. */
+    /** Пауза (длительность из настроек) перед открытием отвлекающего приложения. */
     private void showDelay(AppEntry app, View from) {
         hideKeyboard();
         if (delayDialog != null) delayDialog.dismiss();
-        final int[] left = {Guard.DELAY_SECONDS};
+        final int[] left = {prefs.pauseSeconds()};
         AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(app.label)
-                .setMessage("Пауза " + Guard.DELAY_SECONDS + " секунд.\n\n"
+                .setMessage("Пауза " + prefs.pauseSeconds() + " сек.\n\n"
                         + "Зачем ты открываешь это приложение?\nМожет, сейчас не нужно?")
                 .setNegativeButton("Не открывать", null)
                 .setPositiveButton("Открыть (" + left[0] + ")", (d, w) -> startApp(app, from))
@@ -1403,7 +1405,7 @@ public class MainActivity extends Activity {
             }
             m.add("📁   В папку…", () -> pickFolder(app));
         }
-        m.add(distracting ? "⏳   Отвлекающее: да (снять отметку)" : "⏳   Отметить как отвлекающее (пауза 20 сек)",
+        m.add(distracting ? "⏳   Отвлекающее: да (снять отметку)" : "⏳   Отметить как отвлекающее (пауза " + prefs.pauseSeconds() + " сек)",
                 () -> setDistracting(pkg, !distracting));
         boolean hidden = prefs.hidden().contains(app.key);
         m.add(hidden ? "👁   Показывать в списке" : "🙈   Скрыть из списка",
@@ -1463,7 +1465,7 @@ public class MainActivity extends Activity {
         if (on) {
             // Две зоны: убираем с рабочего стола и из папок.
             for (AppEntry a : allApps) if (a.packageName().equals(pkg)) removeEverywhere(a.key);
-            toast("Теперь только из списка и после паузы 20 сек");
+            toast("Теперь только из списка и после паузы " + prefs.pauseSeconds() + " сек");
         }
         renderHome();
         onQueryChanged();
@@ -1586,26 +1588,50 @@ public class MainActivity extends Activity {
         boolean night = Guard.nightActive(prefs);
         boolean video = Guard.videoActive(prefs);
         Menu m = new Menu();
-        m.add("⏳   Отвлекающие приложения (" + countPackages(prefs.distracting()) + ") — пауза "
-                + Guard.DELAY_SECONDS + " сек", this::editDistracting);
+        boolean gray = prefs.grayscale();
+        m.add("⚫   Чёрно-белый экран телефона: " + (gray ? "вкл" : "выкл")
+                + (gray && !Guard.canControlGrayscale(this) ? " (нужно разрешение)" : ""), () -> {
+            if (!gray) {
+                prefs.setGrayscale(true);
+                if (Guard.canControlGrayscale(this)) Guard.setPhoneGrayscale(this, true);
+                else showGrayscaleHelp();
+                showSettings();
+            } else if (!Guard.canControlGrayscale(this)) {
+                showGrayscaleHelp();
+            } else {
+                confirmWithDelay("Выключить чёрно-белый экран?", () -> {
+                    prefs.setGrayscale(false);
+                    Guard.setPhoneGrayscale(this, false);
+                    toast("Цветной экран. Включить обратно — в настройках, сразу.");
+                });
+            }
+        });
+        m.add("⏱   Пауза перед отвлекающими: " + prefs.pauseSeconds() + " сек", this::pickPause);
+        m.add("⏳   Отвлекающие приложения (" + countPackages(prefs.distracting()) + ")", this::editDistracting);
 
         String videoState;
         if (!video) videoState = "выкл";
-        else if (prefs.videoUnblockAt() > 0) videoState = "вкл, выключится в 9:00";
+        else if (prefs.videoUnblockAt() > 0) videoState = "вкл, выключится в " + Guard.nightEndText(prefs);
         else videoState = "вкл";
         m.add("🚫   Блок видео и браузеров: " + videoState, this::toggleVideoBlock);
         m.add("🎬   Что блокировать как видео (" + countPackages(prefs.videoApps()) + ")", this::editVideoApps);
 
-        m.add("🌙   Ночной режим " + Guard.NIGHT_START_HOUR + ":00–" + Guard.NIGHT_END_HOUR + ":00: "
+        m.add("🌙   Ночной режим " + Guard.nightRangeText(prefs) + ": "
                 + onOff(prefs.nightMode()) + (night ? " (сейчас ночь)" : ""), () -> {
-            if (prefs.nightMode() && night) {
-                toast("Ночью выключить нельзя. До 9:00.");
-                return;
+            if (!prefs.nightMode()) {
+                prefs.setNightMode(true);
+                updateGuards(true);
+                showSettings();
+            } else if (night) {
+                toast("Ночью выключить нельзя. До " + Guard.nightEndText(prefs) + ".");
+            } else {
+                confirmWithDelay("Выключить ночной режим?", () -> {
+                    prefs.setNightMode(false);
+                    updateGuards(true);
+                });
             }
-            prefs.setNightMode(!prefs.nightMode());
-            updateGuards(true);
-            showSettings();
         });
+        m.add("🕘   Время ночного режима: " + Guard.nightRangeText(prefs), this::pickNightHours);
         m.add("📖   Разрешено ночью (" + countPackages(prefs.nightAllowed()) + " + звонки и будильник)",
                 this::editNightAllowed);
 
@@ -1621,6 +1647,127 @@ public class MainActivity extends Activity {
         m.show("Настройки");
     }
 
+    /**
+     * Ослабление ограничений — только после ожидания LOOSEN_DELAY_SECONDS.
+     * Кнопка «Подтвердить» становится активной в конце отсчёта.
+     */
+    private void confirmWithDelay(String title, Runnable action) {
+        final int[] left = {Guard.LOOSEN_DELAY_SECONDS};
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(title)
+                .setMessage("Подожди " + Guard.LOOSEN_DELAY_SECONDS + " секунд.\n\n"
+                        + "Если это порыв — просто закрой окно. Если правда нужно — подтверди после отсчёта.")
+                .setNegativeButton("Не надо", null)
+                .setPositiveButton("Подтвердить (" + left[0] + ")", (d, w) -> action.run())
+                .create();
+        dialog.setCanceledOnTouchOutside(false);
+        Runnable tick = new Runnable() {
+            @Override public void run() {
+                if (!dialog.isShowing()) return;
+                Button b = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                left[0]--;
+                if (left[0] > 0) {
+                    b.setText("Подтвердить (" + left[0] + ")");
+                    main.postDelayed(this, 1000);
+                } else {
+                    b.setText("Подтвердить");
+                    b.setEnabled(true);
+                }
+            }
+        };
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            main.postDelayed(tick, 1000);
+        });
+        dialog.setOnDismissListener(d -> main.removeCallbacks(tick));
+        dialog.show();
+    }
+
+    private void pickPause() {
+        int[] values = {5, 10, 15, 20, 30, 45, 60, 90, 120};
+        String[] names = new String[values.length + 1];
+        for (int i = 0; i < values.length; i++) names[i] = values[i] + " сек";
+        names[values.length] = "Своё число…";
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Пауза перед отвлекающими")
+                .setItems(names, (d, which) -> {
+                    if (which < values.length) applyPause(values[which]);
+                    else askText("Сколько секунд?", String.valueOf(prefs.pauseSeconds()), t -> {
+                        try {
+                            applyPause(Integer.parseInt(t.trim()));
+                        } catch (NumberFormatException e) {
+                            toast("Нужно число");
+                        }
+                    });
+                })
+                .show();
+    }
+
+    private void applyPause(int seconds) {
+        int v = Math.max(1, Math.min(600, seconds));
+        if (v >= prefs.pauseSeconds()) {
+            prefs.setPauseSeconds(v);
+            toast("Пауза: " + v + " сек");
+            onQueryChanged();
+        } else {
+            confirmWithDelay("Уменьшить паузу до " + v + " сек?", () -> {
+                prefs.setPauseSeconds(v);
+                toast("Пауза: " + v + " сек");
+            });
+        }
+    }
+
+    private void pickNightHours() {
+        if (Guard.nightActive(prefs)) {
+            toast("Ночью менять нельзя. До " + Guard.nightEndText(prefs) + ".");
+            return;
+        }
+        int oldStart = prefs.nightStart();
+        int oldEnd = prefs.nightEnd();
+        new android.app.TimePickerDialog(this, android.R.style.Theme_DeviceDefault_Dialog_Alert, (v1, h1, m1) -> {
+            int start = h1 * 60 + m1;
+            new android.app.TimePickerDialog(this, android.R.style.Theme_DeviceDefault_Dialog_Alert, (v2, h2, m2) -> {
+                int end = h2 * 60 + m2;
+                if (nightLength(start, end) >= nightLength(oldStart, oldEnd)
+                        && covers(start, end, oldStart, oldEnd)) {
+                    // Ночь стала длиннее и включает прежнюю — это усиление, сразу.
+                    prefs.setNightHours(start, end);
+                    toast("Ночной режим: " + Guard.nightRangeText(prefs));
+                    updateGuards(true);
+                } else {
+                    confirmWithDelay("Ночной режим " + Guard.hhmm(start) + "–" + Guard.hhmm(end) + "?", () -> {
+                        prefs.setNightHours(start, end);
+                        updateGuards(true);
+                    });
+                }
+            }, oldEnd / 60, oldEnd % 60, true) {{ setTitle("Ночной режим заканчивается в…"); }}.show();
+        }, oldStart / 60, oldStart % 60, true) {{ setTitle("Ночной режим начинается в…"); }}.show();
+    }
+
+    private static int nightLength(int start, int end) {
+        return ((end - start) % 1440 + 1440) % 1440;
+    }
+
+    /** Покрывает ли ночь [s1,e1) целиком ночь [s2,e2). */
+    private static boolean covers(int s1, int e1, int s2, int e2) {
+        int len1 = nightLength(s1, e1);
+        int off = ((s2 - s1) % 1440 + 1440) % 1440;
+        return off + nightLength(s2, e2) <= len1;
+    }
+
+    private void showGrayscaleHelp() {
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Нужно разрешение (один раз)")
+                .setMessage("Чтобы лаунчер держал весь телефон чёрно-белым, ему нужно разрешение, "
+                        + "которое выдаётся один раз с компьютера по кабелю.\n\n"
+                        + "Команда для Терминала:\n"
+                        + "adb shell pm grant " + getPackageName() + " android.permission.WRITE_SECURE_SETTINGS\n\n"
+                        + "Пошаговую инструкцию даст Claude. Пока разрешения нет, "
+                        + "можно включить «Оттенки серого» в настройках телефона вручную.")
+                .setPositiveButton("Понятно", null)
+                .show();
+    }
+
     private void toggleVideoBlock() {
         if (!Guard.videoActive(prefs)) {
             prefs.setVideoBlock(true);
@@ -1630,8 +1777,8 @@ public class MainActivity extends Activity {
             prefs.setVideoUnblockAt(0);
             toast("Отмена выключения: блок остаётся");
         } else {
-            prefs.setVideoUnblockAt(Guard.nextMorning(System.currentTimeMillis()));
-            toast("Блок выключится в 9:00. Раньше — никак.");
+            prefs.setVideoUnblockAt(Guard.nextMorning(prefs, System.currentTimeMillis()));
+            toast("Блок выключится в " + Guard.nightEndText(prefs) + ". Раньше — никак.");
         }
         updateGuards(true);
         showSettings();
@@ -1683,7 +1830,7 @@ public class MainActivity extends Activity {
     }
 
     private void editDistracting() {
-        editPackages("Отвлекающие (пауза 20 сек, не на рабочем столе)", prefs.distracting(), null,
+        editPackages("Отвлекающие (пауза " + prefs.pauseSeconds() + " сек, не на рабочем столе)", prefs.distracting(), null,
                 (chosen, before) -> {
                     prefs.setDistracting(chosen);
                     for (AppEntry a : allApps) {
@@ -1714,7 +1861,7 @@ public class MainActivity extends Activity {
 
     private void editNightAllowed() {
         if (Guard.nightActive(prefs)) {
-            toast("Ночью менять нельзя. До 9:00.");
+            toast("Ночью менять нельзя. До " + Guard.nightEndText(prefs) + ".");
             return;
         }
         Set<String> system = new HashSet<>();
@@ -1956,7 +2103,10 @@ public class MainActivity extends Activity {
 
     /** Каждую минуту: наступила ли ночь/утро, не пора ли снять блок видео. */
     private final BroadcastReceiver timeReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context c, Intent i) { updateGuards(false); }
+        @Override public void onReceive(Context c, Intent i) {
+            Guard.enforceGrayscale(MainActivity.this, prefs);
+            updateGuards(false);
+        }
     };
 
     // ------------------------------------------------------------------ helpers
