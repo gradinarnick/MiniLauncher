@@ -42,32 +42,91 @@ final class Prefs {
         sp = context.getSharedPreferences(FILE, Context.MODE_PRIVATE);
     }
 
-    // ---- Рабочий стол ----
-    List<String> home() {
-        if (!sp.contains(K_HOME)) {
-            // Перенос избранного из прежней версии лаунчера.
-            List<String> migrated = new ArrayList<>();
-            for (String k : splitList(sp.getString(K_FAVORITES, ""))) {
-                if (migrated.size() < MAX_HOME) migrated.add("a:" + k);
-            }
-            setHome(migrated);
-            return migrated;
+    // ---- Рабочий стол: свободная сетка COLS × ROWS, как в Pixel Launcher ----
+    static final int COLS = 4;
+    static final int ROWS = 6;
+    static final int CELLS = COLS * ROWS;
+    private static final String K_GRID = "home_grid_v3"; // строки "клетка|элемент"
+
+    /** Клетка → элемент ("a:<ключ>" или "f:<id папки>"). Пустые клетки отсутствуют. */
+    java.util.TreeMap<Integer, String> grid() {
+        java.util.TreeMap<Integer, String> g = new java.util.TreeMap<>();
+        if (!sp.contains(K_GRID)) {
+            // Перенос из прежних версий: элементы подряд, прижаты к низу экрана.
+            List<String> old = new ArrayList<>();
+            if (sp.contains(K_HOME)) old.addAll(splitList(sp.getString(K_HOME, "")));
+            else for (String k : splitList(sp.getString(K_FAVORITES, ""))) old.add("a:" + k);
+            int n = Math.min(old.size(), MAX_HOME);
+            int rows = (n + COLS - 1) / COLS;
+            int first = (ROWS - rows) * COLS;
+            for (int i = 0; i < n; i++) g.put(first + i, old.get(i));
+            setGrid(g);
+            return g;
         }
-        return splitList(sp.getString(K_HOME, ""));
+        for (String line : splitList(sp.getString(K_GRID, ""))) {
+            int bar = line.indexOf('|');
+            if (bar <= 0) continue;
+            try {
+                int cell = Integer.parseInt(line.substring(0, bar));
+                if (cell >= 0 && cell < CELLS) g.put(cell, line.substring(bar + 1));
+            } catch (NumberFormatException ignored) {}
+        }
+        return g;
     }
 
-    void setHome(List<String> items) {
-        sp.edit().putString(K_HOME, String.join("\n", items)).apply();
+    void setGrid(java.util.Map<Integer, String> g) {
+        List<String> lines = new ArrayList<>();
+        for (java.util.Map.Entry<Integer, String> e : new java.util.TreeMap<>(g).entrySet()) {
+            lines.add(e.getKey() + "|" + e.getValue());
+        }
+        sp.edit().putString(K_GRID, String.join("\n", lines)).apply();
     }
 
-    void moveHome(String item, int delta) {
-        List<String> list = home();
-        int i = list.indexOf(item);
-        int j = i + delta;
-        if (i < 0 || j < 0 || j >= list.size()) return;
-        list.remove(i);
-        list.add(j, item);
-        setHome(list);
+    /** Элементы рабочего стола по порядку клеток (только для чтения). */
+    List<String> home() {
+        return new ArrayList<>(grid().values());
+    }
+
+    int cellOf(String item) {
+        for (java.util.Map.Entry<Integer, String> e : grid().entrySet()) {
+            if (e.getValue().equals(item)) return e.getKey();
+        }
+        return -1;
+    }
+
+    void removeItem(String item) {
+        java.util.TreeMap<Integer, String> g = grid();
+        g.values().removeIf(item::equals);
+        setGrid(g);
+    }
+
+    void replaceItem(String oldItem, String newItem) {
+        java.util.TreeMap<Integer, String> g = grid();
+        for (java.util.Map.Entry<Integer, String> e : g.entrySet()) {
+            if (e.getValue().equals(oldItem)) e.setValue(newItem);
+        }
+        setGrid(g);
+    }
+
+    /**
+     * Ставит элемент в клетку preferred, если она свободна, иначе — в первую свободную,
+     * начиная с нижнего ряда. @return false, если места нет или лимит MAX_HOME.
+     */
+    boolean placeItem(String item, int preferred) {
+        java.util.TreeMap<Integer, String> g = grid();
+        if (g.containsValue(item)) return true;
+        if (g.size() >= MAX_HOME) return false;
+        int cell = -1;
+        if (preferred >= 0 && preferred < CELLS && !g.containsKey(preferred)) cell = preferred;
+        for (int r = ROWS - 1; r >= 0 && cell < 0; r--) {
+            for (int c = 0; c < COLS; c++) {
+                if (!g.containsKey(r * COLS + c)) { cell = r * COLS + c; break; }
+            }
+        }
+        if (cell < 0) return false;
+        g.put(cell, item);
+        setGrid(g);
+        return true;
     }
 
     // ---- Папки ----
