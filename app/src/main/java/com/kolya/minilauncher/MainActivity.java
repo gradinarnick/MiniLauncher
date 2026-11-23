@@ -197,6 +197,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (dragItem == null) hideRemoveZone();
         Guard.refreshSystemApps(this);
         reloadApps();
         updateGuards(true);
@@ -213,6 +214,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
+        dragItem = null;
+        hideRemoveZone();
         closeDrawerNow();
         if (delayDialog != null) {
             delayDialog.dismiss();
@@ -387,10 +390,13 @@ public class MainActivity extends Activity {
                     removeZone.setScaleY(1.1f);
                     return true;
                 case DragEvent.ACTION_DRAG_EXITED:
-                case DragEvent.ACTION_DRAG_ENDED:
                     removeZone.setTextColor(TEXT);
                     removeZone.setScaleX(1f);
                     removeZone.setScaleY(1f);
+                    return true;
+                case DragEvent.ACTION_DRAG_ENDED:
+                    hideRemoveZone();
+                    onDragFinished();
                     return true;
                 case DragEvent.ACTION_DROP:
                     dropDone = true;
@@ -758,7 +764,15 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void hideRemoveZone() {
+        removeZone.setVisibility(View.GONE);
+        removeZone.setTextColor(TEXT);
+        removeZone.setScaleX(1f);
+        removeZone.setScaleY(1f);
+    }
+
     private void onDragFinished() {
+        hideRemoveZone();
         if (dragItem == null) return;
         String item = dragItem;
         boolean menu = dropOnSelf;
