@@ -1,281 +1,190 @@
 package com.kolya.minilauncher;
 
+import android.content.ContentResolver;
 import android.content.Context;
-import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.net.Uri;
-import android.provider.AlarmClock;
-import android.telecom.TelecomManager;
+import android.provider.Settings;
 
-import java.util.Arrays;
 import java.util.Calendar;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 
 /**
- * Правила против постоянного залипания в телефоне:
- *  - отвлекающие приложения открываются только после паузы (длительность настраивается)
- *    и не ставятся на рабочий стол;
- *  - ночной режим (время настраивается, по умолчанию 20:00–9:00): доступны только звонки,
- *    будильник и разрешённые приложения (Библия); выключить его ночью нельзя;
- *  - блок видео и браузеров: включается сразу, а выключается только в конце ночного режима;
- *  - весь телефон чёрно-белый: лаунчер держит системную функцию включённой
- *    (нужно разрешение WRITE_SECURE_SETTINGS, выдаётся один раз через adb).
+ * Решает, можно ли открыть приложение прямо сейчас. Все ограничения — только здесь:
+ * ночной режим, блок видео, обход фильтра, правила приложений и временный доступ по коду.
  */
 final class Guard {
-    /** Задержка перед любым ослаблением ограничений. */
-    static final int LOOSEN_DELAY_SECONDS = 30;
+    static final int OK = 0, PAUSE = 1, BLOCK = 2;
 
-    /** Видеоприложения и соцсети с видео. Браузеры определяются автоматически. */
-    private static final Set<String> KNOWN_VIDEO = new HashSet<>(Arrays.asList(
-            "com.google.android.youtube",
-            "com.google.android.apps.youtube.kids",
-            "com.google.android.youtube.tv",
-            "app.revanced.android.youtube",
-            "app.rvx.android.youtube",
-            "com.vanced.android.youtube",
-            "org.schabi.newpipe",
-            "free.rm.skytube.oss",
-            "com.zhiliaoapp.musically",
-            "com.ss.android.ugc.trill",
-            "com.ss.android.ugc.aweme",
-            "com.instagram.android",
-            "com.instagram.lite",
-            "com.facebook.katana",
-            "com.facebook.lite",
-            "com.snapchat.android",
-            "com.vkontakte.android",
-            "com.vk.vkvideo",
-            "com.vk.vkclient",
-            "ru.rutube.app",
-            "ru.rutube.app.tv",
-            "video.like",
-            "com.yandex.zen",
-            "ru.yandex.yandexvideo",
-            "ru.ivi.client",
-            "ru.kinopoisk",
-            "ru.more.play",
-            "com.netflix.mediaclient",
-            "tv.twitch.android.app",
-            "com.dailymotion.dailymotion",
-            "com.vimeo.android.videoapp",
-            "com.kwai.video",
-            "com.smile.gifmaker",
-            "com.pinterest"
-    ));
+    /** Решение для приложения. */
+    static final class Verdict {
+        final int kind;
+        final String title;
+        final String text;
+        final int illustration;
+        final int seconds;
+        final boolean dark;
 
-    /** Мессенджеры и прочее, что открывается «на автомате» — только пауза, без блокировки. */
-    private static final Set<String> KNOWN_DISTRACTING = new HashSet<>(Arrays.asList(
-            "org.telegram.messenger",
-            "org.telegram.messenger.web",
-            "org.telegram.messenger.beta",
-            "org.telegram.plus",
-            "org.thunderdog.challegram",
-            "nekox.messenger",
-            "tw.nekomimi.nekogram",
-            "com.exteragram.messenger",
-            "com.twitter.android",
-            "com.reddit.frontpage",
-            "ru.ok.android",
-            "com.discord"
-    ));
+        Verdict(int kind, String title, String text, int illustration, int seconds, boolean dark) {
+            this.kind = kind;
+            this.title = title;
+            this.text = text;
+            this.illustration = illustration;
+            this.seconds = seconds;
+            this.dark = dark;
+        }
+    }
 
-    private static Set<String> systemNight = new HashSet<>();
+    static final Verdict ALLOW = new Verdict(OK, null, null, 0, 0, false);
 
     private Guard() {}
 
-    // ------------------------------------------------------------------ время
-
-    static boolean isNight(Prefs prefs, long now) {
-        Calendar c = Calendar.getInstance();
-        c.setTimeInMillis(now);
-        int m = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
-        int start = prefs.nightStart();
-        int end = prefs.nightEnd();
-        if (start == end) return false;
-        return start < end ? (m >= start && m < end) : (m >= start || m < end);
-    }
-
-    /** Ближайший конец ночного режима строго после now. */
-    static long nextMorning(Prefs prefs, long now) {
-        Calendar c = Calendar.getInstance();
-        c.setTimeInMillis(now);
-        c.set(Calendar.HOUR_OF_DAY, prefs.nightEnd() / 60);
-        c.set(Calendar.MINUTE, prefs.nightEnd() % 60);
-        c.set(Calendar.SECOND, 0);
-        c.set(Calendar.MILLISECOND, 0);
-        if (c.getTimeInMillis() <= now) c.add(Calendar.DAY_OF_YEAR, 1);
-        return c.getTimeInMillis();
-    }
+    // ------------------------------------------------------------ время
 
     static String hhmm(int minutes) {
         return String.format(Locale.ROOT, "%d:%02d", minutes / 60, minutes % 60);
     }
 
-    static String nightEndText(Prefs prefs) {
-        return hhmm(prefs.nightEnd());
+    static String clock(long millis) {
+        Calendar c = Calendar.getInstance();
+        c.setTimeInMillis(millis);
+        return hhmm(c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE));
     }
 
-    static String nightRangeText(Prefs prefs) {
-        return hhmm(prefs.nightStart()) + "–" + hhmm(prefs.nightEnd());
+    static int minuteOfDay(long now) {
+        Calendar c = Calendar.getInstance();
+        c.setTimeInMillis(now);
+        return c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
     }
 
-    static boolean nightActive(Prefs prefs) {
-        return prefs.nightMode() && isNight(prefs, System.currentTimeMillis());
+    /** Попадает ли время в промежуток [start, end) — в том числе через полночь. */
+    static boolean inRange(long now, int start, int end) {
+        if (start == end) return false;
+        int m = minuteOfDay(now);
+        return start < end ? (m >= start && m < end) : (m >= start || m < end);
     }
 
-    // ------------------------------------------------------------------ чёрно-белый телефон
+    static boolean nightNow(Prefs p) {
+        return p.nightMode() && inRange(System.currentTimeMillis(), p.nightStart(), p.nightEnd());
+    }
+
+    static String nightRange(Prefs p) {
+        return hhmm(p.nightStart()) + "–" + hhmm(p.nightEnd());
+    }
+
+    // ------------------------------------------------------------ временный доступ
+
+    static boolean temp(Prefs p, String scope) {
+        return p.until(scope) > System.currentTimeMillis();
+    }
+
+    /** Фильтр видео действует (включён и не открыт временно по коду). */
+    static boolean videoFilterActive(Prefs p) {
+        return p.videoBlock() && !temp(p, "all") && !temp(p, "video");
+    }
+
+    // ------------------------------------------------------------ главное решение
+
+    static Verdict check(Context c, Prefs p, String pkg, long now) {
+        if (pkg == null || pkg.equals(c.getPackageName()) || Lists.isAlwaysAllowed(pkg)) return ALLOW;
+        if (temp(p, "all")) return ALLOW;
+
+        if (p.nightMode() && inRange(now, p.nightStart(), p.nightEnd())
+                && !Lists.nightSystem.contains(pkg) && !p.nightAllowed().contains(pkg)) {
+            return new Verdict(BLOCK, "Ночной режим",
+                    "До " + hhmm(p.nightEnd()) + " доступны только звонки, будильник и Библия.\nОтдохни — телефон подождёт.",
+                    R.drawable.ill_moon, 0, true);
+        }
+
+        if (videoFilterActive(p)) {
+            if (Lists.isBypassApp(pkg)) {
+                return new Verdict(BLOCK, "Закрыто",
+                        "Через это приложение можно обойти блок видео, поэтому оно закрыто.",
+                        R.drawable.ill_block, 0, false);
+            }
+            if (Lists.isVideoApp(pkg)) {
+                return new Verdict(BLOCK, "Видео заблокировано",
+                        "Видеоприложения закрыты.\nВременный доступ — только по коду владельца ключа.",
+                        R.drawable.ill_video_off, 0, false);
+            }
+            if (Lists.isBrowser(pkg) && (!FilterVpn.running || Net.privateDnsBypass(c))) {
+                return new Verdict(BLOCK, "Фильтр видео выключен",
+                        "Пока фильтр сети не работает, браузеры закрыты.\nОткрой «Фокус» и включи фильтр.",
+                        R.drawable.ill_video_off, 0, false);
+            }
+        }
+
+        if (temp(p, "app:" + pkg)) return ALLOW;
+
+        Rule r = Rule.parse(p.rule(pkg));
+        switch (r.type) {
+            case Rule.BLOCK:
+                return new Verdict(BLOCK, "Заблокировано",
+                        "Для этого приложения стоит полный запрет.", R.drawable.ill_block, 0, false);
+            case Rule.SCHED:
+                if (inRange(now, r.a, r.b)) {
+                    return new Verdict(BLOCK, "Сейчас недоступно",
+                            "Приложение закрыто с " + hhmm(r.a) + " до " + hhmm(r.b) + ".",
+                            R.drawable.ill_clock, 0, false);
+                }
+                break;
+            case Rule.LIMIT:
+                if (p.usedToday(pkg) >= r.a * 60_000L) {
+                    return new Verdict(BLOCK, "Лимит на сегодня исчерпан",
+                            r.a + " мин в день уже использованы.\nЗавтра лимит начнётся заново.",
+                            R.drawable.ill_timer, 0, false);
+                }
+                break;
+            case Rule.PAUSE:
+                return new Verdict(PAUSE, "Пауза", null, R.drawable.ill_hourglass, Math.max(3, r.a), false);
+            default:
+                break;
+        }
+        return ALLOW;
+    }
+
+    static Verdict videoPageVerdict() {
+        return new Verdict(BLOCK, "Видео заблокировано",
+                "Видеосайты закрыты в любом браузере.\nВременный доступ — только по коду владельца ключа.",
+                R.drawable.ill_video_off, 0, false);
+    }
+
+    static Verdict protectVerdict() {
+        return new Verdict(BLOCK, "Защищено",
+                "Отключить или удалить «Фокус» можно только с кодом владельца ключа:\nФокус → Ключ → Удалить.",
+                R.drawable.ill_shield, 0, false);
+    }
+
+    // ------------------------------------------------------------ чёрно-белый телефон
 
     private static final String DALTONIZER_ENABLED = "accessibility_display_daltonizer_enabled";
     private static final String DALTONIZER_MODE = "accessibility_display_daltonizer";
-    private static final int MODE_MONOCHROME = 0;
 
-    /** Выдано ли разрешение менять системные настройки (adb shell pm grant …). */
-    static boolean canControlGrayscale(Context ctx) {
-        return ctx.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS")
-                == PackageManager.PERMISSION_GRANTED;
+    static boolean canControlSystem(Context c) {
+        return c.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED;
     }
 
-    static boolean isPhoneGrayscale(Context ctx) {
+    static boolean isPhoneGrayscale(Context c) {
         try {
-            android.content.ContentResolver cr = ctx.getContentResolver();
-            return android.provider.Settings.Secure.getInt(cr, DALTONIZER_ENABLED, 0) == 1
-                    && android.provider.Settings.Secure.getInt(cr, DALTONIZER_MODE, -1) == MODE_MONOCHROME;
+            ContentResolver cr = c.getContentResolver();
+            return Settings.Secure.getInt(cr, DALTONIZER_ENABLED, 0) == 1
+                    && Settings.Secure.getInt(cr, DALTONIZER_MODE, -1) == 0;
         } catch (Exception e) {
             return false;
         }
     }
 
-    /** Если чёрно-белый режим положен — включает его (в том числе после выключения в обход). */
-    static void enforceGrayscale(Context ctx, Prefs prefs) {
-        if (!prefs.grayscale() || !canControlGrayscale(ctx)) return;
-        if (isPhoneGrayscale(ctx)) return;
-        setPhoneGrayscale(ctx, true);
+    static void enforceGrayscale(Context c, Prefs p) {
+        if (!p.grayscale() || temp(p, "all") || !canControlSystem(c) || isPhoneGrayscale(c)) return;
+        setPhoneGrayscale(c, true);
     }
 
-    static void setPhoneGrayscale(Context ctx, boolean on) {
+    static void setPhoneGrayscale(Context c, boolean on) {
         try {
-            android.content.ContentResolver cr = ctx.getContentResolver();
-            if (on) android.provider.Settings.Secure.putInt(cr, DALTONIZER_MODE, MODE_MONOCHROME);
-            android.provider.Settings.Secure.putInt(cr, DALTONIZER_ENABLED, on ? 1 : 0);
+            ContentResolver cr = c.getContentResolver();
+            if (on) Settings.Secure.putInt(cr, DALTONIZER_MODE, 0);
+            Settings.Secure.putInt(cr, DALTONIZER_ENABLED, on ? 1 : 0);
         } catch (Exception ignored) {
-            // Нет разрешения — ничего не делаем.
+            // нет разрешения — ничего не делаем
         }
-    }
-
-    /** Действует ли блок видео прямо сейчас (и снимает его, если наступило время). */
-    static boolean videoActive(Prefs prefs) {
-        if (!prefs.videoBlock()) return false;
-        long until = prefs.videoUnblockAt();
-        if (until > 0 && System.currentTimeMillis() >= until) {
-            prefs.setVideoBlock(false);
-            prefs.setVideoUnblockAt(0);
-            return false;
-        }
-        return true;
-    }
-
-    // ------------------------------------------------------------------ проверки
-
-    /** Звонилки и будильник — разрешены ночью всегда. */
-    static void refreshSystemApps(Context ctx) {
-        Set<String> s = new HashSet<>();
-        PackageManager pm = ctx.getPackageManager();
-        try {
-            TelecomManager tm = ctx.getSystemService(TelecomManager.class);
-            if (tm != null && tm.getDefaultDialerPackage() != null) s.add(tm.getDefaultDialerPackage());
-        } catch (Exception ignored) {}
-        addResolvers(pm, new Intent(Intent.ACTION_DIAL), s);
-        addResolvers(pm, new Intent(AlarmClock.ACTION_SHOW_ALARMS), s);
-        addResolvers(pm, new Intent(AlarmClock.ACTION_SET_ALARM), s);
-        s.remove(ctx.getPackageName());
-        systemNight = s;
-    }
-
-    static boolean allowedAtNight(Prefs prefs, String pkg) {
-        return systemNight.contains(pkg) || prefs.nightAllowed().contains(pkg);
-    }
-
-    static boolean isSystemNightApp(String pkg) {
-        return systemNight.contains(pkg);
-    }
-
-    /** @return текст причины блокировки или null, если приложение можно открыть. */
-    static String blockReason(Prefs prefs, String pkg) {
-        if (nightActive(prefs) && !allowedAtNight(prefs, pkg)) {
-            return "Ночной режим до " + nightEndText(prefs) + ".\nСейчас доступны только звонки, будильник и Библия.";
-        }
-        if (videoActive(prefs) && prefs.videoApps().contains(pkg)) {
-            String when = prefs.videoUnblockAt() > 0 ? " до " + nightEndText(prefs) : "";
-            return "Видео и браузеры заблокированы" + when + ".\nВидео можно смотреть только в Telegram.";
-        }
-        return null;
-    }
-
-    static boolean isDistracting(Prefs prefs, String pkg) {
-        return prefs.distracting().contains(pkg);
-    }
-
-    // ------------------------------------------------------------------ автоклассификация
-
-    /**
-     * Новые установленные видеоприложения и браузеры сразу попадают в блок видео и
-     * в отвлекающие, мессенджеры-«залипалки» — в отвлекающие. Каждое приложение
-     * классифицируется один раз: если потом снять с него отметку, она не вернётся.
-     */
-    static void autoClassify(Context ctx, Prefs prefs, List<AppEntry> apps) {
-        Set<String> installed = new HashSet<>();
-        for (AppEntry a : apps) installed.add(a.packageName());
-
-        Set<String> browsers = new HashSet<>();
-        Intent web = new Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com"));
-        web.addCategory(Intent.CATEGORY_BROWSABLE);
-        addResolvers(ctx.getPackageManager(), web, browsers);
-
-        Set<String> seen = prefs.seenPackages();
-        Set<String> video = prefs.videoApps();
-        Set<String> distracting = prefs.distracting();
-        boolean changed = false;
-        for (String pkg : installed) {
-            if (seen.contains(pkg)) continue;
-            seen.add(pkg);
-            changed = true;
-            if (KNOWN_VIDEO.contains(pkg) || browsers.contains(pkg)) {
-                video.add(pkg);
-                distracting.add(pkg);
-            } else if (KNOWN_DISTRACTING.contains(pkg)) {
-                distracting.add(pkg);
-            }
-        }
-        if (!prefs.biblePresetDone()) {
-            Set<String> night = prefs.nightAllowed();
-            for (AppEntry a : apps) {
-                String l = a.originalLabel.toLowerCase(Locale.ROOT);
-                String p = a.packageName().toLowerCase(Locale.ROOT);
-                if (l.contains("библи") || l.contains("bible") || l.contains("biblia")
-                        || l.contains("біблі") || p.contains("bible") || p.contains("biblia")) {
-                    night.add(a.packageName());
-                }
-            }
-            prefs.setNightAllowed(night);
-            prefs.setBiblePresetDone();
-        }
-        if (changed) {
-            prefs.setSeenPackages(seen);
-            prefs.setVideoApps(video);
-            prefs.setDistracting(distracting);
-        }
-    }
-
-    private static void addResolvers(PackageManager pm, Intent intent, Set<String> out) {
-        try {
-            List<ResolveInfo> list = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL);
-            for (ResolveInfo ri : list) {
-                if (ri.activityInfo != null) out.add(ri.activityInfo.packageName);
-            }
-        } catch (Exception ignored) {}
     }
 }

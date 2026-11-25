@@ -1,2215 +1,1262 @@
 package com.kolya.minilauncher;
 
 import android.app.Activity;
-import android.app.ActivityOptions;
-import android.app.AlertDialog;
-import android.app.role.RoleManager;
-import android.appwidget.AppWidgetHost;
-import android.appwidget.AppWidgetHostView;
-import android.appwidget.AppWidgetManager;
-import android.appwidget.AppWidgetProviderInfo;
-import android.content.ActivityNotFoundException;
-import android.content.BroadcastReceiver;
-import android.content.ClipData;
-import android.content.Context;
+import android.app.Dialog;
+import android.app.TimePickerDialog;
+import android.app.admin.DevicePolicyManager;
+import android.content.ComponentName;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.SharedPreferences;
-import android.content.pm.LauncherApps;
-import android.graphics.Color;
-import android.graphics.ColorMatrix;
-import android.graphics.ColorMatrixColorFilter;
+import android.graphics.Bitmap;
 import android.graphics.Insets;
-import android.graphics.Rect;
 import android.graphics.Typeface;
-import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.UserHandle;
-import android.provider.AlarmClock;
 import android.provider.Settings;
 import android.text.Editable;
+import android.text.InputFilter;
 import android.text.InputType;
-import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.TypedValue;
-import android.view.GestureDetector;
-import android.view.DragEvent;
 import android.view.Gravity;
-import android.view.HapticFeedbackConstants;
-import android.view.KeyEvent;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
-import android.view.WindowInsetsController;
-import android.view.inputmethod.EditorInfo;
-import android.widget.AbsListView;
-import android.widget.BaseAdapter;
-import android.widget.Button;
+import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ListView;
 import android.widget.ScrollView;
-import android.widget.TextClock;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 
-import java.text.Collator;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
+import java.util.Date;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
-/**
- * Лаунчер с рабочим столом как на iPhone и защитой от залипания.
- *
- * Рабочий стол: часы, дата, виджеты и сетка 4×3 из иконок (до 12 мест, папки) в нижней части.
- * Свайп вверх — список всех приложений с поиском (полупрозрачный фон).
- * Свайп вниз — шторка уведомлений. Долгое нажатие на пустом месте — настройки.
- * Правила (пауза, ночной режим, блок видео) — в {@link Guard}.
- */
+/** Главный экран «Фокуса»: плитки с картинками и экраны настроек. */
 public class MainActivity extends Activity {
-
-    private static final int TEXT = Color.WHITE;
-    private static final int TEXT_DIM = 0xB3FFFFFF;
-    /** Лёгкое затемнение списка приложений, чтобы текст читался поверх обоев. */
-    private static final int DRAWER_SCRIM = 0x4D000000;
-    private static final int COLS = 4;
-    private static final int HOST_ID = 1024;
-    private static final int MAX_WIDGETS = 4;
-    private static final int REQ_DEFAULT = 42;
-    private static final int REQ_BIND = 101;
-    private static final int REQ_CONFIG = 102;
+    private static final int REQ_VPN = 11, REQ_ADMIN = 12;
 
     private Prefs prefs;
-    private LauncherApps launcherApps;
-    private AppWidgetManager widgetManager;
-    private AppWidgetHost widgetHost;
-    private int pendingWidgetId = -1;
-    private final Handler main = new Handler(Looper.getMainLooper());
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private FrameLayout host;
+    private final ArrayDeque<Runnable> stack = new ArrayDeque<>();
+    private Runnable current;
+    private List<AppEntry> apps = new ArrayList<>();
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private Insets insets = Insets.NONE;
 
-    private final List<AppEntry> allApps = new ArrayList<>();
-    private final Map<String, AppEntry> byKey = new HashMap<>();
-    private final List<AppEntry> filtered = new ArrayList<>();
-    private final Map<String, Drawable> icons = new HashMap<>();
+    /** Новый ключ, который ещё не подтверждён кодом. */
+    private String pendingSecret;
+    private String unlockScope = "all";
+    private AppEntry unlockApp;
+    private int unlockMinutes = 15;
 
-    private FrameLayout root;
-    private LinearLayout home;
-    private TextClock dateView;
-    private TextView statusLine;
-    private LinearLayout widgetsBox;
-    private LinearLayout grid;
-    private LinearLayout drawer;
-    private EditText search;
-    private ListView list;
-    private final AppAdapter adapter = new AppAdapter();
-    private GestureDetector gestures;
+    private final Runnable homePage = this::home;
+    private final Runnable videoPage = this::videoPage;
+    private final Runnable appsPage = this::appsPage;
+    private final Runnable nightPage = this::nightPage;
+    private final Runnable grayPage = this::grayPage;
+    private final Runnable keyPage = this::keyPage;
+    private final Runnable unlockPage = this::unlockPage;
 
-    private boolean drawerOpen;
-    private OnBackInvokedCallback backCallback;
-    private AlertDialog delayDialog;
-    private boolean lastNight;
-    /** Перетаскивание на рабочем столе: что тащим и чем закончилось. */
-    private String dragItem;          // "a:…"/"f:…" с рабочего стола или "new:<ключ>" из списка
-    private boolean dropOnSelf;
-    private boolean dropDone;
-    private float dragStartX, dragStartY, dragMaxMove;
-    /** Снимок сетки на время перетаскивания (чтобы не читать настройки на каждое движение). */
-    private java.util.TreeMap<Integer, String> dragGrid = new java.util.TreeMap<>();
-    private TextView removeZone;
-    private TextView emptyHint;
-    /** Открытая сейчас папка (для перетаскивания внутри неё). */
-    private String openFolderId;
-    private AlertDialog openFolderDialog;
-    private boolean folderReordered;
-    private boolean lastVideo;
+    private final Runnable refresher = new Runnable() {
+        @Override
+        public void run() {
+            if (current == homePage || current == unlockPage) render();
+            handler.postDelayed(this, 20_000);
+        }
+    };
 
-    // ------------------------------------------------------------------ lifecycle
+    // ================================================================== жизненный цикл
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
         prefs = new Prefs(this);
-        launcherApps = getSystemService(LauncherApps.class);
-        widgetManager = AppWidgetManager.getInstance(this);
-        widgetHost = new AppWidgetHost(this, HOST_ID);
-        Guard.refreshSystemApps(this);
-
-        if (Build.VERSION.SDK_INT < 35) {
-            // На Android 15+ edge-to-edge включён принудительно.
-            enableEdgeToEdgeLegacy();
-        }
-        buildUi();
-        setContentView(root);
-        applyTheme();
-        renderWidgets();
-
-        gestures = new GestureDetector(this, new SwipeListener());
-        gestures.setIsLongpressEnabled(false);
-
-        launcherApps.registerCallback(packageCallback, main);
-        IntentFilter f = new IntentFilter();
-        f.addAction(Intent.ACTION_MANAGED_PROFILE_AVAILABLE);
-        f.addAction(Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE);
-        f.addAction(Intent.ACTION_MANAGED_PROFILE_REMOVED);
-        if (Build.VERSION.SDK_INT >= 34) {
-            f.addAction(Intent.ACTION_PROFILE_AVAILABLE);
-            f.addAction(Intent.ACTION_PROFILE_UNAVAILABLE);
-        }
-        registerReceiver(profileReceiver, f, Context.RECEIVER_EXPORTED);
-
-        IntentFilter t = new IntentFilter();
-        t.addAction(Intent.ACTION_TIME_TICK);
-        t.addAction(Intent.ACTION_TIME_CHANGED);
-        t.addAction(Intent.ACTION_TIMEZONE_CHANGED);
-        registerReceiver(timeReceiver, t, Context.RECEIVER_EXPORTED);
-
+        getWindow().setDecorFitsSystemWindows(false);
+        host = new FrameLayout(this);
+        host.setBackgroundColor(Ui.BG);
+        host.setOnApplyWindowInsetsListener((v, wi) -> {
+            insets = wi.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.ime());
+            applyInsets();
+            return WindowInsets.CONSUMED;
+        });
+        setContentView(host);
         if (Build.VERSION.SDK_INT >= 33) {
-            backCallback = this::closeDrawer;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::goBack);
         }
-        lastNight = Guard.nightActive(prefs);
-        lastVideo = Guard.videoActive(prefs);
-        reloadApps();
-    }
-
-    @Override
-    protected void onStart() {
-        super.onStart();
-        try { widgetHost.startListening(); } catch (Exception ignored) {}
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        if (dragItem == null) hideRemoveZone();
-        Guard.refreshSystemApps(this);
-        Guard.enforceGrayscale(this, prefs);
-        reloadApps();
-        updateGuards(true);
-        maybeAskDefaultLauncher();
+        Lists.refresh(this);
+        apps = AppRepository.load(this);
+        preset();
+        current = homePage;
+        if ("unlock".equals(getIntent().getStringExtra("page"))) {
+            stack.push(homePage);
+            current = unlockPage;
+        }
+        render();
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        // Нажатие «Домой», когда лаунчер уже на экране: возвращаемся к главному.
-        if (Intent.ACTION_MAIN.equals(intent.getAction())) closeDrawer();
+        if ("unlock".equals(intent.getStringExtra("page")) && current != unlockPage) open(unlockPage);
     }
 
     @Override
-    protected void onStop() {
-        super.onStop();
-        dragItem = null;
-        hideRemoveZone();
-        closeDrawerNow();
-        if (delayDialog != null) {
-            delayDialog.dismiss();
-            delayDialog = null;
-        }
-        try { widgetHost.stopListening(); } catch (Exception ignored) {}
+    protected void onResume() {
+        super.onResume();
+        Net.ensureAccessibility(this);
+        Net.enforcePrivateDns(this);
+        Guard.enforceGrayscale(this, prefs);
+        FilterVpn.start(this);
+        apps = AppRepository.load(this);
+        render();
+        // фильтр мог ещё не успеть запуститься — обновим экран чуть позже
+        handler.postDelayed(() -> { if (current == homePage) render(); }, 1500);
+        handler.postDelayed(refresher, 20_000);
     }
 
     @Override
-    protected void onDestroy() {
-        launcherApps.unregisterCallback(packageCallback);
-        try { unregisterReceiver(profileReceiver); } catch (IllegalArgumentException ignored) {}
-        try { unregisterReceiver(timeReceiver); } catch (IllegalArgumentException ignored) {}
-        io.shutdownNow();
-        super.onDestroy();
+    protected void onPause() {
+        super.onPause();
+        handler.removeCallbacksAndMessages(null);
     }
 
-    /** Android 11–12: системная «Назад». На 13+ используется OnBackInvokedCallback. */
     @SuppressWarnings("deprecation")
     @Override
     public void onBackPressed() {
-        if (drawerOpen) closeDrawer();
-        // На главном экране «Назад» ничего не делает — это лаунчер.
+        goBack();
     }
 
     @Override
-    public boolean dispatchTouchEvent(MotionEvent ev) {
-        gestures.onTouchEvent(ev);
-        return super.dispatchTouchEvent(ev);
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req == REQ_VPN && res == RESULT_OK) FilterVpn.start(this);
+        handler.postDelayed(this::render, 800);
     }
 
-    // ------------------------------------------------------------------ UI
-
-    private void buildUi() {
-        root = new FrameLayout(this);
-        root.setOnApplyWindowInsetsListener((v, insets) -> {
-            Insets bars = insets.getInsets(WindowInsets.Type.systemBars()
-                    | WindowInsets.Type.displayCutout());
-            Insets ime = insets.getInsets(WindowInsets.Type.ime());
-            v.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
-            return WindowInsets.CONSUMED;
-        });
-
-        // ---- Рабочий стол
-        home = new LinearLayout(this);
-        home.setOrientation(LinearLayout.VERTICAL);
-        home.setPadding(dp(16), dp(32), dp(16), dp(28));
-        home.setOnLongClickListener(v -> { showHomePopup(); return true; });
-
-        TextClock clock = new TextClock(this);
-        clock.setFormat24Hour("HH:mm");
-        clock.setFormat12Hour("h:mm");
-        style(clock, 64, TEXT);
-        clock.setTypeface(Typeface.create("sans-serif-thin", Typeface.NORMAL));
-        clock.setPadding(dp(8), 0, dp(8), 0);
-        clock.setOnClickListener(v -> safeStart(new Intent(AlarmClock.ACTION_SHOW_ALARMS)));
-        home.addView(clock, wrap());
-
-        dateView = new TextClock(this);
-        dateView.setFormat24Hour("EEEE, d MMMM");
-        dateView.setFormat12Hour("EEEE, d MMMM");
-        style(dateView, 18, TEXT_DIM);
-        dateView.setPadding(dp(8), 0, dp(8), 0);
-        dateView.setOnClickListener(v -> {
-            if (Guard.nightActive(prefs)) { toast("Ночной режим до " + Guard.nightEndText(prefs)); return; }
-            safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR));
-        });
-        home.addView(dateView, wrap());
-
-        statusLine = new TextView(this);
-        style(statusLine, 14, 0xFFFFD27A);
-        statusLine.setPadding(dp(8), dp(6), dp(8), 0);
-        statusLine.setVisibility(View.GONE);
-        home.addView(statusLine, wrap());
-
-        widgetsBox = new LinearLayout(this);
-        widgetsBox.setOrientation(LinearLayout.VERTICAL);
-        home.addView(widgetsBox, matchWrap());
-
-        emptyHint = new TextView(this);
-        emptyHint.setText("Свайп вверх — все приложения. Зажми приложение и перетащи сюда.\n"
-                + "Долгое нажатие на пустом месте — настройки.");
-        style(emptyHint, 14, TEXT_DIM);
-        emptyHint.setPadding(dp(8), dp(12), dp(8), 0);
-        emptyHint.setVisibility(View.GONE);
-        home.addView(emptyHint, wrap());
-
-        // Свободная сетка 4×6 на всё оставшееся место — как в Pixel Launcher.
-        grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        glp.topMargin = dp(8);
-        home.addView(grid, glp);
-
-        root.addView(home, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        // ---- Список всех приложений
-        drawer = new LinearLayout(this);
-        drawer.setOrientation(LinearLayout.VERTICAL);
-        drawer.setPadding(dp(24), dp(16), dp(24), 0);
-        drawer.setVisibility(View.GONE);
-
-        search = new EditText(this);
-        search.setHint("Поиск");
-        search.setHintTextColor(0x99FFFFFF);
-        search.setTextColor(TEXT);
-        search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
-        search.setShadowLayer(6f, 0f, 1f, 0x99000000);
-        search.setSingleLine(true);
-        search.setBackground(null);
-        search.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
-        search.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-        search.setPadding(dp(8), dp(12), dp(8), dp(12));
-        search.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
-            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
-            @Override public void afterTextChanged(Editable s) { onQueryChanged(); }
-        });
-        search.setOnEditorActionListener((v, actionId, event) -> {
-            boolean enter = event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
-                    && event.getAction() == KeyEvent.ACTION_DOWN;
-            if (actionId == EditorInfo.IME_ACTION_GO || enter) {
-                if (!filtered.isEmpty()) launch(filtered.get(0), v);
-                return true;
-            }
-            return false;
-        });
-        drawer.addView(search, matchWrap());
-
-        list = new ListView(this);
-        list.setDivider(null);
-        list.setSelector(android.R.color.transparent);
-        list.setVerticalScrollBarEnabled(false);
-        list.setFastScrollEnabled(true);
-        list.setAdapter(adapter);
-        list.setOnItemClickListener((p, v, pos, id) -> launch(filtered.get(pos), v));
-        list.setOnItemLongClickListener((p, v, pos, id) -> {
-            startDrawerDrag(filtered.get(pos), v);
-            return true;
-        });
-        list.setOnScrollListener(new AbsListView.OnScrollListener() {
-            @Override public void onScrollStateChanged(AbsListView view, int state) {
-                // При прокрутке убираем клавиатуру, чтобы видеть весь список.
-                if (state == SCROLL_STATE_TOUCH_SCROLL) hideKeyboard();
-            }
-            @Override public void onScroll(AbsListView v, int a, int b, int c) {}
-        });
-        drawer.addView(list, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        root.addView(drawer, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        // ---- «✕ Убрать» сверху, пока тащишь иконку с рабочего стола (как в Pixel Launcher)
-        removeZone = new TextView(this);
-        removeZone.setText("✕  Убрать");
-        removeZone.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        removeZone.setTextColor(TEXT);
-        removeZone.setShadowLayer(8f, 0f, 1f, 0xAA000000);
-        removeZone.setGravity(Gravity.CENTER);
-        removeZone.setVisibility(View.GONE);
-        removeZone.setOnDragListener((v, e) -> {
-            switch (e.getAction()) {
-                case DragEvent.ACTION_DRAG_STARTED:
-                    return dragItem != null && !dragItem.startsWith("new:");
-                case DragEvent.ACTION_DRAG_ENTERED:
-                    removeZone.setTextColor(0xFFFF6B6B);
-                    removeZone.setScaleX(1.1f);
-                    removeZone.setScaleY(1.1f);
-                    return true;
-                case DragEvent.ACTION_DRAG_EXITED:
-                    removeZone.setTextColor(TEXT);
-                    removeZone.setScaleX(1f);
-                    removeZone.setScaleY(1f);
-                    return true;
-                case DragEvent.ACTION_DRAG_ENDED:
-                    hideRemoveZone();
-                    onDragFinished();
-                    return true;
-                case DragEvent.ACTION_DROP:
-                    dropDone = true;
-                    removeDragged(dragItem);
-                    return true;
-                default:
-                    return true;
-            }
-        });
-        root.addView(removeZone, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(56), Gravity.TOP));
-
-        // Конец перетаскивания (куда бы ни отпустили): вернуть экран в обычный вид.
-        home.setOnDragListener((v, e) -> {
-            switch (e.getAction()) {
-                case DragEvent.ACTION_DRAG_STARTED:
-                case DragEvent.ACTION_DRAG_LOCATION:
-                    trackMove(v, e);
-                    return true;
-                case DragEvent.ACTION_DRAG_ENDED:
-                    onDragFinished();
-                    return true;
-                default:
-                    return true;
-            }
-        });
-    }
-
-    private void applyTheme() {
-        boolean black = prefs.blackTheme();
-        root.setBackgroundColor(black ? Color.BLACK : Color.TRANSPARENT);
-        drawer.setBackgroundColor(black ? Color.BLACK : DRAWER_SCRIM);
-        dateView.setVisibility(prefs.showDate() ? View.VISIBLE : View.GONE);
-    }
-
-    private void updateStatus() {
-        List<String> parts = new ArrayList<>();
-        if (Guard.nightActive(prefs)) parts.add("🌙 Ночной режим до " + Guard.nightEndText(prefs));
-        if (Guard.videoActive(prefs)) {
-            parts.add(prefs.videoUnblockAt() > 0 ? "Видео заблокировано до " + Guard.nightEndText(prefs) : "Видео заблокировано");
-        }
-        statusLine.setText(TextUtils.join(" · ", parts));
-        statusLine.setVisibility(parts.isEmpty() ? View.GONE : View.VISIBLE);
-    }
-
-    /** Пересчитывает ограничения; при смене состояния перерисовывает экран. */
-    private void updateGuards(boolean force) {
-        boolean n = Guard.nightActive(prefs);
-        boolean v = Guard.videoActive(prefs);
-        if (force || n != lastNight || v != lastVideo) {
-            lastNight = n;
-            lastVideo = v;
-            renderHome();
-            onQueryChanged();
-        }
-        updateStatus();
-    }
-
-    // ------------------------------------------------------------------ рабочий стол
-
-    private void renderHome() {
-        grid.removeAllViews();
-        if (allApps.isEmpty()) return; // приложения ещё загружаются
-        java.util.TreeMap<Integer, String> g = prefs.grid();
-        emptyHint.setVisibility(g.isEmpty() ? View.VISIBLE : View.GONE);
-        for (int r = 0; r < Prefs.ROWS; r++) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            for (int c = 0; c < Prefs.COLS; c++) {
-                int cell = r * Prefs.COLS + c;
-                String item = g.get(cell);
-                View v = item == null ? null : homeCell(item);
-                if (v == null) v = new View(this);
-                FrameLayout slot = new FrameLayout(this);
-                slot.addView(v, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
-                slot.setOnDragListener(new SlotDrag(cell));
-                row.addView(slot, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
-            }
-            grid.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        }
-    }
-
-    /** Вид элемента рабочего стола или null, если приложения сейчас нет. */
-    private View homeCell(String item) {
-        if (item.startsWith("a:")) {
-            AppEntry app = byKey.get(item.substring(2));
-            // Две зоны: отвлекающие приложения на рабочем столе не показываются.
-            if (app == null || Guard.isDistracting(prefs, app.packageName())) return null;
-            return appCell(app, null);
-        }
-        if (item.startsWith("f:")) {
-            String id = item.substring(2);
-            List<AppEntry> apps = folderEntries(id);
-            return apps.isEmpty() ? null : folderCell(id, apps);
-        }
-        return null;
-    }
-
-    // ------------------------------------------------------------------ перетаскивание
-
-    private void startDrag(String item, View cell, View icon) {
-        dragItem = item;
-        resetMove();
-        dragGrid = prefs.grid();
-        dropOnSelf = false;
-        dropDone = false;
-        cell.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-        ClipData data = ClipData.newPlainText("launcher", item);
-        // «Убрать» показываем ДО начала перетаскивания: иначе зона не получит событий.
-        removeZone.setVisibility(View.VISIBLE);
-        if (cell.startDragAndDrop(data, new View.DragShadowBuilder(icon), item, 0)) {
-            cell.setAlpha(0.3f);
-        } else {
-            dragItem = null;
-            removeZone.setVisibility(View.GONE);
-            if (openFolderDialog != null) openFolderDialog.dismiss();
-            showMenuFor(item);
-        }
-    }
-
-    /** Из общего списка: зажал — список уезжает, тащишь иконку прямо на рабочий стол. */
-    private void startDrawerDrag(AppEntry app, View row) {
-        if (Guard.isDistracting(prefs, app.packageName())) {
-            // Две зоны: отвлекающие на рабочий стол нельзя — сразу меню.
-            showDrawerAppMenu(app);
-            return;
-        }
-        View icon = row instanceof ViewGroup && ((ViewGroup) row).getChildCount() > 0
-                ? ((ViewGroup) row).getChildAt(0) : row;
-        dragItem = "new:" + app.key;
-        resetMove();
-        dragGrid = prefs.grid();
-        dropOnSelf = false;
-        dropDone = false;
-        row.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-        hideKeyboard();
-        home.animate().cancel();
-        home.setAlpha(1f);
-        ClipData data = ClipData.newPlainText("launcher", dragItem);
-        if (row.startDragAndDrop(data, new View.DragShadowBuilder(icon), dragItem, 0)) {
-            drawerOpen = false;
-            unregisterBack();
-            drawer.animate().cancel();
-            drawer.setVisibility(View.GONE);
-        } else {
-            dragItem = null;
-            showDrawerAppMenu(app);
-        }
-    }
-
-    private void resetMove() {
-        dragStartX = Float.NaN;
-        dragStartY = Float.NaN;
-        dragMaxMove = 0f;
-    }
-
-    /** Сколько палец прошёл за перетаскивание (в координатах экрана, с любой клетки). */
-    private void trackMove(View v, DragEvent e) {
-        int[] loc = new int[2];
-        v.getLocationOnScreen(loc);
-        float x = loc[0] + e.getX();
-        float y = loc[1] + e.getY();
-        if (Float.isNaN(dragStartX)) {
-            dragStartX = x;
-            dragStartY = y;
-        } else {
-            dragMaxMove = Math.max(dragMaxMove, Math.abs(x - dragStartX) + Math.abs(y - dragStartY));
-        }
-    }
-
-    /** Подсветка и приём «броска» на клетку сетки. */
-    private final class SlotDrag implements View.OnDragListener {
-        private final int cell;
-
-        SlotDrag(int cell) { this.cell = cell; }
-
-        @Override
-        public boolean onDrag(View v, DragEvent e) {
-            switch (e.getAction()) {
-                case DragEvent.ACTION_DRAG_STARTED:
-                    return dragItem != null;
-                case DragEvent.ACTION_DRAG_ENTERED:
-                case DragEvent.ACTION_DRAG_LOCATION:
-                    trackMove(v, e);
-                    // Палец ушёл за окно папки — закрываем её, дальше тащим по рабочему столу.
-                    if (openFolderDialog != null && dragItem != null && dragItem.startsWith("fold:")) {
-                        openFolderDialog.dismiss();
-                    }
-                    v.setBackground(highlight(v, e, cell));
-                    return true;
-                case DragEvent.ACTION_DRAG_EXITED:
-                case DragEvent.ACTION_DRAG_ENDED:
-                    v.setBackground(null);
-                    return true;
-                case DragEvent.ACTION_DROP:
-                    trackMove(v, e);
-                    v.setBackground(null);
-                    dropDone = true;
-                    dropOn(cell, overIcon(v, e));
-                    return true;
-                default:
-                    return true;
-            }
-        }
-    }
-
-    /** Палец над самой иконкой (а не у края клетки) — «положить в папку». */
-    private boolean overIcon(View v, DragEvent e) {
-        float cx = v.getWidth() / 2f, cy = v.getHeight() / 2f;
-        return Math.abs(e.getX() - cx) < dp(26) && Math.abs(e.getY() - cy) < dp(30);
-    }
-
-    private Drawable highlight(View v, DragEvent e, int cell) {
-        String target = dragGrid.get(cell);
-        if (dragItem == null || dragItem.equals(target)) return null;
-        GradientDrawable d = new GradientDrawable();
-        d.setCornerRadius(dp(18));
-        boolean merge = target != null && !dragItem.startsWith("f:") && overIcon(v, e);
-        d.setColor(merge ? 0x55FFFFFF : 0x22FFFFFF);
-        return d;
-    }
-
-    private void dropOn(int cell, boolean merge) {
-        String src = dragItem;
-        if (src == null) return;
-        if (src.startsWith("fold:")) {
-            dropFromFolder(src, cell, merge);
-            return;
-        }
-        boolean fromList = src.startsWith("new:");
-        // Из списка: подержал и отпустил на месте — это не перенос, а меню (см. onDragFinished).
-        if (fromList && dragMaxMove < dp(24)) return;
-        String item = fromList ? "a:" + src.substring(4) : src;
-        java.util.TreeMap<Integer, String> g = prefs.grid();
-        String target = g.get(cell);
-        if (item.equals(target)) {
-            if (!fromList) dropOnSelf = true; // подержал и отпустил на месте — меню
-            return;
-        }
-        int from = -1;
-        for (Map.Entry<Integer, String> e : g.entrySet()) if (e.getValue().equals(item)) from = e.getKey();
-
-        if (target != null && merge && item.startsWith("a:")) {
-            String key = item.substring(2);
-            if (fromList) removeFromFolders(key);
-            g = prefs.grid();
-            if (from >= 0) g.remove(from);
-            if (target.startsWith("f:")) {
-                String id = target.substring(2);
-                List<String> apps = prefs.folderApps(id);
-                if (!apps.contains(key)) apps.add(key);
-                prefs.setFolderApps(id, apps);
-            } else {
-                // Иконка на иконку — папка, как в Pixel Launcher.
-                String id = prefs.newFolderId();
-                prefs.setFolderName(id, "Папка");
-                List<String> apps = new ArrayList<>();
-                apps.add(target.substring(2));
-                apps.add(key);
-                prefs.setFolderApps(id, apps);
-                g.put(cell, "f:" + id);
-            }
-            prefs.setGrid(g);
-            return;
-        }
-
-        if (fromList && from < 0) {
-            if (g.size() >= Prefs.MAX_HOME) {
-                toast("На рабочем столе максимум " + Prefs.MAX_HOME + " приложений. Можно сложить в папку.");
-                return;
-            }
-            removeFromFolders(item.substring(2));
-            g = prefs.grid();
-            if (target != null) {
-                // Клетка занята — сдвигаем её жильца в ближайшую свободную.
-                int free = nearestFree(g, cell);
-                if (free < 0) return;
-                g.put(free, target);
-            }
-            g.put(cell, item);
-            prefs.setGrid(g);
-            return;
-        }
-
-        if (from < 0) return;
-        // Перенос по сетке: на пустую клетку — просто туда, на занятую — меняемся местами.
-        g.remove(from);
-        if (target != null) g.put(from, target);
-        g.put(cell, item);
-        prefs.setGrid(g);
-    }
-
-    /** Иконку вынесли из папки на рабочий стол (в клетку, на иконку или в другую папку). */
-    private void dropFromFolder(String src, int cell, boolean merge) {
-        if (dragMaxMove < dp(24)) return;
-        String rest = src.substring(5);
-        int colon = rest.indexOf(':');
-        String fid = rest.substring(0, colon);
-        String key = rest.substring(colon + 1);
-        java.util.TreeMap<Integer, String> g = prefs.grid();
-        String target = g.get(cell);
-        if (("f:" + fid).equals(target)) return; // вернули в ту же папку
-        List<String> apps = prefs.folderApps(fid);
-        boolean folderVanishes = apps.size() <= 1;
-
-        int dest = -1;
-        if (!(target != null && merge)) {
-            dest = target == null ? cell : nearestFree(g, cell);
-            if (dest < 0 || (!folderVanishes && g.size() >= Prefs.MAX_HOME)) {
-                toast("На рабочем столе нет места");
-                return;
-            }
-        }
-        // Достаём из старой папки (пустая папка исчезает).
-        apps.remove(key);
-        if (apps.isEmpty()) {
-            g.values().removeIf(("f:" + fid)::equals);
-            prefs.deleteFolderData(fid);
-        } else {
-            prefs.setFolderApps(fid, apps);
-        }
-        if (dest >= 0) {
-            g.put(dest, "a:" + key);
-        } else if (target.startsWith("f:")) {
-            String tid = target.substring(2);
-            List<String> other = prefs.folderApps(tid);
-            if (!other.contains(key)) other.add(key);
-            prefs.setFolderApps(tid, other);
-        } else {
-            String id = prefs.newFolderId();
-            prefs.setFolderName(id, "Папка");
-            List<String> both = new ArrayList<>();
-            both.add(target.substring(2));
-            both.add(key);
-            prefs.setFolderApps(id, both);
-            g.put(cell, "f:" + id);
-        }
-        prefs.setGrid(g);
-    }
-
-    private int nearestFree(java.util.TreeMap<Integer, String> g, int cell) {
-        int best = -1, bestDist = Integer.MAX_VALUE;
-        int r0 = cell / Prefs.COLS, c0 = cell % Prefs.COLS;
-        for (int i = 0; i < Prefs.CELLS; i++) {
-            if (g.containsKey(i)) continue;
-            int d = Math.abs(i / Prefs.COLS - r0) + Math.abs(i % Prefs.COLS - c0);
-            if (d < bestDist) { bestDist = d; best = i; }
-        }
-        return best;
-    }
-
-    private void removeDragged(String item) {
-        if (item == null || item.startsWith("new:")) return;
-        if (item.startsWith("fold:")) {
-            removeFromFolders(item.substring(item.indexOf(':', 5) + 1));
-            return;
-        }
-        if (item.startsWith("a:")) {
-            removeEverywhere(item.substring(2));
-        } else if (item.startsWith("f:")) {
-            String id = item.substring(2);
-            main.post(() -> deleteFolder(id));
-        }
-    }
-
-    private void hideRemoveZone() {
-        removeZone.setVisibility(View.GONE);
-        removeZone.setTextColor(TEXT);
-        removeZone.setScaleX(1f);
-        removeZone.setScaleY(1f);
-    }
-
-    private void onDragFinished() {
-        hideRemoveZone();
-        if (dragItem == null) return;
-        String item = dragItem;
-        boolean menu = dropOnSelf;
-        // Из списка: подержал и отпустил, не двигая, — вернуть список и показать меню.
-        boolean listMenu = item.startsWith("new:") && dragMaxMove < dp(24);
-        boolean fromFolder = item.startsWith("fold:");
-        boolean reopen = fromFolder && !menu && (folderReordered || !dropDone);
-        String folderToReopen = openFolderId;
-        folderReordered = false;
-        dragItem = null;
-        dropOnSelf = false;
-        removeZone.setVisibility(View.GONE);
-        if (fromFolder && openFolderDialog != null) openFolderDialog.dismiss();
-        main.post(() -> {
-            renderHome();
-            if (menu) showMenuFor(item);
-            if (reopen && folderToReopen != null) openFolder(folderToReopen);
-            if (listMenu) {
-                AppEntry app = byKey.get(item.substring(4));
-                if (app != null) {
-                    openDrawer();
-                    showDrawerAppMenu(app);
-                }
-            }
-        });
-    }
-
-    private void showMenuFor(String item) {
-        if (item.startsWith("a:")) {
-            AppEntry app = byKey.get(item.substring(2));
-            if (app != null) showHomeAppMenu(app);
-        } else if (item.startsWith("f:")) {
-            showFolderMenu(item.substring(2));
-        } else if (item.startsWith("fold:")) {
-            AppEntry app = byKey.get(item.substring(item.indexOf(':', 5) + 1));
-            if (app != null) showFolderAppMenu(app);
-        }
-    }
-
-    private void addRows(LinearLayout target, List<View> cells) {
-        int rows = (cells.size() + COLS - 1) / COLS;
-        for (int r = 0; r < rows; r++) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            for (int c = 0; c < COLS; c++) {
-                int i = r * COLS + c;
-                View cell = i < cells.size() ? cells.get(i) : new View(this);
-                row.addView(cell, new LinearLayout.LayoutParams(0,
-                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            }
-            target.addView(row, matchWrap());
-        }
-    }
-
-    /** Ячейка приложения. folderDialog != null — ячейка внутри открытой папки. */
-    private View appCell(AppEntry app, AlertDialog folderDialog) {
-        LinearLayout cell = cellBase(app.label);
-        ImageView iv = new ImageView(this);
-        iv.setImageDrawable(share(icon(app)));
-        applyIconFilter(iv);
-        cell.addView(iv, 0, new LinearLayout.LayoutParams(dp(56), dp(56)));
-        if (Guard.blockReason(prefs, app.packageName()) != null) cell.setAlpha(0.35f);
-        cell.setOnClickListener(v -> {
-            if (folderDialog != null) folderDialog.dismiss();
-            launch(app, v);
-        });
-        cell.setOnLongClickListener(v -> {
-            if (folderDialog != null) {
-                startDrag("fold:" + openFolderId + ":" + app.key, cell, iv);
-            } else {
-                startDrag("a:" + app.key, cell, iv);
-            }
-            return true;
-        });
-        return cell;
-    }
-
-    private View folderCell(String id, List<AppEntry> apps) {
-        LinearLayout cell = cellBase(prefs.folderName(id));
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER);
-        box.setPadding(dp(5), dp(5), dp(5), dp(5));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x55FFFFFF);
-        bg.setCornerRadius(dp(14));
-        box.setBackground(bg);
-        for (int r = 0; r < 2; r++) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            for (int c = 0; c < 2; c++) {
-                int i = r * 2 + c;
-                ImageView mini = new ImageView(this);
-                if (i < apps.size()) {
-                    mini.setImageDrawable(share(icon(apps.get(i))));
-                    applyIconFilter(mini);
-                }
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(20), dp(20));
-                lp.setMargins(dp(1), dp(1), dp(1), dp(1));
-                row.addView(mini, lp);
-            }
-            box.addView(row, wrap());
-        }
-        cell.addView(box, 0, new LinearLayout.LayoutParams(dp(56), dp(56)));
-        cell.setOnClickListener(v -> openFolder(id));
-        cell.setOnLongClickListener(v -> { startDrag("f:" + id, cell, box); return true; });
-        return cell;
-    }
-
-    private LinearLayout cellBase(String label) {
-        LinearLayout cell = new LinearLayout(this);
-        cell.setOrientation(LinearLayout.VERTICAL);
-        cell.setGravity(Gravity.CENTER_HORIZONTAL);
-        cell.setPadding(dp(4), dp(8), dp(4), dp(8));
-        TextView tv = new TextView(this);
-        tv.setText(label);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        tv.setTextColor(TEXT);
-        tv.setShadowLayer(4f, 0f, 1f, 0x99000000);
-        tv.setSingleLine(true);
-        tv.setEllipsize(TextUtils.TruncateAt.END);
-        tv.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(6);
-        cell.addView(tv, lp);
-        return cell;
-    }
-
-    private Drawable icon(AppEntry app) {
-        Drawable d = icons.get(app.key);
-        if (d != null) return d;
-        try {
-            d = app.info.getBadgedIcon(0);
-        } catch (Exception e) {
-            d = null;
-        }
-        if (d == null) d = getDrawable(android.R.drawable.sym_def_app_icon);
-        icons.put(app.key, d);
-        return d;
-    }
-
-    /** Отдельная копия иконки для каждого ImageView (одну Drawable нельзя показывать в двух местах). */
-    private Drawable share(Drawable d) {
-        Drawable.ConstantState cs = d == null ? null : d.getConstantState();
-        return cs != null ? cs.newDrawable(getResources()) : d;
-    }
-
-    /** Иконка для строки списка: из кэша или загрузка в фоне (чтобы список не тормозил). */
-    private void bindIcon(ImageView iv, AppEntry a) {
-        iv.setTag(a.key);
-        applyIconFilter(iv);
-        Drawable cached = icons.get(a.key);
-        if (cached != null) {
-            iv.setImageDrawable(share(cached));
-            return;
-        }
-        iv.setImageDrawable(null);
-        io.execute(() -> {
-            Drawable loaded;
-            try {
-                loaded = a.info.getBadgedIcon(0);
-            } catch (Exception e) {
-                loaded = null;
-            }
-            Drawable fin = loaded;
-            main.post(() -> {
-                Drawable d = fin != null ? fin : getDrawable(android.R.drawable.sym_def_app_icon);
-                icons.put(a.key, d);
-                if (a.key.equals(iv.getTag())) iv.setImageDrawable(share(d));
-            });
-        });
-    }
-
-    private void applyIconFilter(ImageView iv) {
-        // Чёрно-белый режим: иконки серые всегда (даже пока нет разрешения на весь телефон).
-        if (prefs.grayIcons() || prefs.grayscale()) {
-            ColorMatrix m = new ColorMatrix();
-            m.setSaturation(0f);
-            iv.setColorFilter(new ColorMatrixColorFilter(m));
-        } else {
-            iv.clearColorFilter();
-        }
-    }
-
-    private List<AppEntry> folderEntries(String id) {
-        List<AppEntry> out = new ArrayList<>();
-        for (String key : prefs.folderApps(id)) {
-            AppEntry a = byKey.get(key);
-            if (a != null && !Guard.isDistracting(prefs, a.packageName())) out.add(a);
-        }
-        return out;
-    }
-
-    private void openFolder(String id) {
-        List<AppEntry> apps = folderEntries(id);
-        if (apps.isEmpty()) return;
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(12), dp(8), dp(12), dp(8));
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(content);
-        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(prefs.folderName(id))
-                .setView(scroll)
-                .create();
-        List<View> cells = new ArrayList<>();
+    /** Первый запуск: Библия доступна ночью, мессенджеры — с паузой 20 секунд. */
+    private void preset() {
+        if (prefs.presetDone()) return;
+        Set<String> night = prefs.nightAllowed();
         for (AppEntry a : apps) {
-            View cell = appCell(a, dialog);
-            cell.setOnDragListener(new FolderDrag(id, a.key));
-            cells.add(cell);
-        }
-        addRows(content, cells);
-        openFolderId = id;
-        openFolderDialog = dialog;
-        dialog.setOnDismissListener(d -> { if (openFolderDialog == dialog) openFolderDialog = null; });
-        dialog.show();
-    }
-
-    /** Перетаскивание внутри открытой папки: бросил на другую иконку — встал на её место. */
-    private final class FolderDrag implements View.OnDragListener {
-        private final String folderId;
-        private final String key;
-
-        FolderDrag(String folderId, String key) {
-            this.folderId = folderId;
-            this.key = key;
-        }
-
-        @Override
-        public boolean onDrag(View v, DragEvent e) {
-            switch (e.getAction()) {
-                case DragEvent.ACTION_DRAG_STARTED:
-                    return dragItem != null && dragItem.startsWith("fold:" + folderId + ":");
-                case DragEvent.ACTION_DRAG_ENTERED:
-                case DragEvent.ACTION_DRAG_LOCATION: {
-                    trackMove(v, e);
-                    boolean self = dragItem != null && dragItem.endsWith(":" + key);
-                    if (self) {
-                        v.setBackground(null);
-                    } else {
-                        GradientDrawable d = new GradientDrawable();
-                        d.setCornerRadius(dp(18));
-                        d.setColor(0x22FFFFFF);
-                        v.setBackground(d);
-                    }
-                    return true;
-                }
-                case DragEvent.ACTION_DRAG_EXITED:
-                case DragEvent.ACTION_DRAG_ENDED:
-                    v.setBackground(null);
-                    return true;
-                case DragEvent.ACTION_DROP: {
-                    trackMove(v, e);
-                    v.setBackground(null);
-                    dropDone = true;
-                    String src = dragItem;
-                    if (src == null) return true;
-                    String moving = src.substring(src.indexOf(':', 5) + 1);
-                    if (moving.equals(key)) {
-                        if (dragMaxMove < dp(24)) dropOnSelf = true;
-                        return true;
-                    }
-                    List<String> apps = prefs.folderApps(folderId);
-                    int from = apps.indexOf(moving);
-                    int to = apps.indexOf(key);
-                    if (from >= 0 && to >= 0) {
-                        apps.remove(from);
-                        apps.add(to, moving);
-                        prefs.setFolderApps(folderId, apps);
-                        folderReordered = true;
-                    }
-                    return true;
-                }
-                default:
-                    return true;
+            String l = a.label.toLowerCase(Locale.ROOT), p = a.pkg.toLowerCase(Locale.ROOT);
+            if (l.contains("библи") || l.contains("bible") || l.contains("biblia") || l.contains("біблі")
+                    || p.contains("bible") || p.contains("biblia")) {
+                night.add(a.pkg);
+            }
+            if (Lists.DISTRACTING.contains(a.pkg) && "allow".equals(prefs.rule(a.pkg))) {
+                prefs.setRule(a.pkg, "pause:20");
             }
         }
+        prefs.setNightAllowed(night);
+        prefs.setPresetDone();
     }
 
-    // ------------------------------------------------------------------ apps
+    // ================================================================== навигация
 
-    private void reloadApps() {
-        io.execute(() -> {
-            List<AppEntry> loaded = AppRepository.load(getApplicationContext(), prefs);
-            Guard.autoClassify(getApplicationContext(), prefs, loaded);
-            main.post(() -> {
-                if (isDestroyed()) return;
-                allApps.clear();
-                allApps.addAll(loaded);
-                byKey.clear();
-                for (AppEntry a : allApps) byKey.put(a.key, a);
-                icons.keySet().retainAll(byKey.keySet());
-                renderHome();
-                onQueryChanged();
-                updateStatus();
-            });
-        });
+    private void open(Runnable page) {
+        stack.push(current);
+        current = page;
+        render();
     }
 
-    private void refreshNames() {
-        AppRepository.applyNames(allApps, prefs);
-        renderHome();
-        onQueryChanged();
-    }
-
-    private void onQueryChanged() {
-        String q = search.getText().toString().trim().toLowerCase(Locale.getDefault());
-        Set<String> hidden = prefs.hidden();
-        boolean night = Guard.nightActive(prefs);
-        filtered.clear();
-        List<AppEntry> pool = new ArrayList<>();
-        for (AppEntry a : allApps) {
-            // Ночью в списке только то, что разрешено.
-            if (night && !Guard.allowedAtNight(prefs, a.packageName())) continue;
-            pool.add(a);
-        }
-        if (q.isEmpty()) {
-            for (AppEntry a : pool) if (!hidden.contains(a.key)) filtered.add(a);
+    private void goBack() {
+        if (stack.isEmpty()) {
+            finish();
         } else {
-            // Ранжирование: начало имени → начало слова → вхождение.
-            // Скрытые приложения находятся поиском, но не видны в общем списке.
-            List<AppEntry> starts = new ArrayList<>();
-            List<AppEntry> word = new ArrayList<>();
-            List<AppEntry> contains = new ArrayList<>();
-            for (AppEntry a : pool) {
-                String s = a.searchKey;
-                if (s.startsWith(q)) starts.add(a);
-                else if (s.contains(" " + q) || s.contains("-" + q)) word.add(a);
-                else if (s.contains(q)) contains.add(a);
-            }
-            filtered.addAll(starts);
-            filtered.addAll(word);
-            filtered.addAll(contains);
-        }
-        adapter.notifyDataSetChanged();
-        if (drawerOpen && !q.isEmpty() && prefs.autoLaunch() && filtered.size() == 1) {
-            launch(filtered.get(0), list);
+            current = stack.pop();
+            render();
         }
     }
 
-    /** Все запуски идут через эту проверку: блокировки → пауза → запуск. */
-    private void launch(AppEntry app, View from) {
-        String reason = Guard.blockReason(prefs, app.packageName());
-        if (reason != null) {
-            hideKeyboard();
-            new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle(app.label)
-                    .setMessage(reason)
-                    .setPositiveButton("Понятно", null)
-                    .show();
-            return;
+    private void render() {
+        if (current != null) current.run();
+    }
+
+    private void applyInsets() {
+        if (host.getChildCount() == 0) return;
+        View v = host.getChildAt(0);
+        v.setPadding(insets.left, insets.top, insets.right, insets.bottom);
+    }
+
+    private int dp(float v) {
+        return Ui.dp(this, v);
+    }
+
+    private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
+    private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
+
+    /** Новая страница: прокрутка + колонка. С заголовком и стрелкой «назад», если title не null. */
+    private LinearLayout page(String title) {
+        ScrollView sv = new ScrollView(this);
+        sv.setClipToPadding(false);
+        sv.setFillViewport(true);
+        LinearLayout col = Ui.col(this);
+        col.setPadding(dp(18), dp(6), dp(18), dp(36));
+        sv.addView(col, new FrameLayout.LayoutParams(MATCH, WRAP));
+        host.removeAllViews();
+        host.addView(sv, new FrameLayout.LayoutParams(MATCH, MATCH));
+        applyInsets();
+        if (title != null) {
+            LinearLayout bar = Ui.row(this);
+            bar.setPadding(0, dp(10), 0, dp(10));
+            TextView back = Ui.text(this, "←", 26, Ui.INK, false);
+            back.setGravity(Gravity.CENTER);
+            Ui.clickable(back, 22, this::goBack);
+            bar.addView(back, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            TextView t = Ui.text(this, title, 22, Ui.INK, true);
+            t.setPadding(dp(6), 0, 0, 0);
+            bar.addView(t);
+            col.addView(bar);
         }
-        if (Guard.isDistracting(prefs, app.packageName())) {
-            showDelay(app, from);
-            return;
+        return col;
+    }
+
+    /** Большая карточка с картинкой сверху страницы. */
+    private void hero(LinearLayout col, int ill, int softColor, String title, String text) {
+        LinearLayout card = Ui.col(this);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setPadding(dp(20), dp(22), dp(20), dp(22));
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{softColor, 0xFFFFFFFF});
+        g.setCornerRadius(dp(28));
+        card.setBackground(g);
+        card.setElevation(dp(1));
+        ImageView art = Ui.image(this, ill, 132);
+        card.addView(art);
+        TextView t = Ui.text(this, title, 22, Ui.INK, true);
+        t.setGravity(Gravity.CENTER);
+        card.addView(t, Ui.lp(this, WRAP, WRAP, 12));
+        if (text != null) {
+            TextView s = Ui.text(this, text, 15, Ui.SUB, false);
+            s.setGravity(Gravity.CENTER);
+            card.addView(s, Ui.lp(this, WRAP, WRAP, 6));
         }
-        startApp(app, from);
+        col.addView(card, Ui.lp(this, MATCH, WRAP, 6));
+        art.setAlpha(0f);
+        art.setTranslationY(dp(10));
+        art.animate().alpha(1f).translationY(0).setDuration(300).start();
     }
 
-    private void startApp(AppEntry app, View from) {
-        try {
-            Rect bounds = new Rect();
-            from.getGlobalVisibleRect(bounds);
-            Bundle opts = ActivityOptions.makeScaleUpAnimation(
-                    from, 0, 0, from.getWidth(), from.getHeight()).toBundle();
-            launcherApps.startMainActivity(app.component, app.user, bounds, opts);
-        } catch (Exception e) {
-            Toast.makeText(this, "Не удалось открыть " + app.label, Toast.LENGTH_SHORT).show();
-            reloadApps();
+    private LinearLayout section(LinearLayout col, String title) {
+        if (title != null) {
+            TextView h = Ui.text(this, title, 14, Ui.SUB, true);
+            h.setPadding(dp(6), 0, 0, 0);
+            col.addView(h, Ui.lp(this, WRAP, WRAP, 20));
         }
+        LinearLayout card = Ui.card(this);
+        col.addView(card, Ui.lp(this, MATCH, WRAP, title != null ? 8 : 14));
+        return card;
     }
 
-    /** Пауза (длительность из настроек) перед открытием отвлекающего приложения. */
-    private void showDelay(AppEntry app, View from) {
-        hideKeyboard();
-        if (delayDialog != null) delayDialog.dismiss();
-        final int[] left = {prefs.pauseSeconds()};
-        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(app.label)
-                .setMessage("Пауза " + prefs.pauseSeconds() + " сек.\n\n"
-                        + "Зачем ты открываешь это приложение?\nМожет, сейчас не нужно?")
-                .setNegativeButton("Не открывать", null)
-                .setPositiveButton("Открыть (" + left[0] + ")", (d, w) -> startApp(app, from))
-                .create();
-        dialog.setCanceledOnTouchOutside(false);
-        Runnable tick = new Runnable() {
-            @Override public void run() {
-                if (!dialog.isShowing()) return;
-                Button b = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-                left[0]--;
-                if (left[0] > 0) {
-                    b.setText("Открыть (" + left[0] + ")");
-                    main.postDelayed(this, 1000);
-                } else {
-                    b.setText("Открыть");
-                    b.setEnabled(true);
-                }
-            }
-        };
-        dialog.setOnShowListener(d -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-            main.postDelayed(tick, 1000);
-        });
-        dialog.setOnDismissListener(d -> {
-            main.removeCallbacks(tick);
-            if (delayDialog == dialog) delayDialog = null;
-        });
-        delayDialog = dialog;
-        dialog.show();
+    private void divider(LinearLayout card) {
+        View d = new View(this);
+        d.setBackgroundColor(Ui.LINE);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(MATCH, 1);
+        p.topMargin = dp(12);
+        p.bottomMargin = dp(12);
+        card.addView(d, p);
     }
 
-    // ------------------------------------------------------------------ рабочий стол: изменения
+    /** Строка с переключателем. Нажатие — onClick (сам решает, нужен ли код). */
+    private void toggleRow(LinearLayout card, String title, String sub, boolean on, Runnable onClick) {
+        LinearLayout row = Ui.row(this);
+        LinearLayout txt = Ui.col(this);
+        txt.addView(Ui.text(this, title, 17, Ui.INK, true));
+        if (sub != null) txt.addView(Ui.text(this, sub, 14, Ui.SUB, false), Ui.lp(this, WRAP, WRAP, 2));
+        row.addView(txt, new LinearLayout.LayoutParams(0, WRAP, 1));
+        Switch sw = new Switch(this);
+        sw.setChecked(on);
+        sw.setClickable(false);
+        sw.setFocusable(false);
+        row.addView(sw);
+        row.setPadding(0, dp(4), 0, dp(4));
+        Ui.clickable(row, 12, onClick);
+        card.addView(row);
+    }
 
-    private boolean addToHome(AppEntry app) {
-        if (Guard.isDistracting(prefs, app.packageName())) {
-            toast("Отвлекающие приложения нельзя ставить на рабочий стол");
-            return false;
+    private void statusRow(LinearLayout card, String title, boolean ok, String okText, String badText, Runnable fix) {
+        LinearLayout row = Ui.row(this);
+        View dot = new View(this);
+        dot.setBackground(Ui.round(ok ? 0xFF22C55E : 0xFFF43F5E, dp(6)));
+        row.addView(dot, new LinearLayout.LayoutParams(dp(12), dp(12)));
+        LinearLayout txt = Ui.col(this);
+        txt.setPadding(dp(12), 0, dp(8), 0);
+        txt.addView(Ui.text(this, title, 16, Ui.INK, true));
+        txt.addView(Ui.text(this, ok ? okText : badText, 14, ok ? Ui.SUB : Ui.RED, false));
+        row.addView(txt, new LinearLayout.LayoutParams(0, WRAP, 1));
+        if (!ok && fix != null) {
+            TextView b = Ui.button(this, "Включить", Ui.BTN_SOFT);
+            b.setPadding(dp(14), dp(8), dp(14), dp(8));
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            b.setOnClickListener(v -> fix.run());
+            row.addView(b);
         }
-        String item = "a:" + app.key;
-        if (prefs.cellOf(item) >= 0) return true;
-        if (prefs.grid().size() >= Prefs.MAX_HOME) {
-            toast("На рабочем столе максимум " + Prefs.MAX_HOME + " приложений. Можно сложить в папку.");
-            return false;
-        }
-        removeFromFolders(app.key);
-        if (!prefs.placeItem(item, -1)) {
-            toast("На рабочем столе нет свободного места");
-            return false;
-        }
-        return true;
+        row.setPadding(0, dp(6), 0, dp(6));
+        card.addView(row);
     }
 
-    /** Убирает приложение и с рабочего стола, и из всех папок. */
-    private void removeEverywhere(String key) {
-        prefs.removeItem("a:" + key);
-        removeFromFolders(key);
-    }
-
-    private void removeFromFolders(String key) {
-        for (String id : prefs.folderIds()) {
-            List<String> apps = prefs.folderApps(id);
-            if (apps.remove(key)) {
-                if (apps.isEmpty()) {
-                    prefs.removeItem("f:" + id);
-                    prefs.deleteFolderData(id);
-                } else {
-                    prefs.setFolderApps(id, apps);
-                }
-            }
-        }
-    }
-
-    private void pickFolder(AppEntry app) {
-        if (Guard.isDistracting(prefs, app.packageName())) {
-            toast("Отвлекающие приложения нельзя класть в папки");
-            return;
-        }
-        List<String> ids = prefs.folderIds();
-        String current = prefs.folderOf(app.key);
-        List<String> names = new ArrayList<>();
-        List<String> targets = new ArrayList<>();
-        for (String id : ids) {
-            if (id.equals(current)) continue;
-            names.add("📁 " + prefs.folderName(id));
-            targets.add(id);
-        }
-        names.add("＋ Новая папка…");
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("В папку")
-                .setItems(names.toArray(new String[0]), (d, which) -> {
-                    if (which < targets.size()) moveToFolder(app, targets.get(which));
-                    else askText("Новая папка", "", name -> moveToNewFolder(app, name));
-                })
-                .show();
-    }
-
-    private void moveToFolder(AppEntry app, String id) {
-        removeEverywhere(app.key);
-        List<String> apps = prefs.folderApps(id);
-        if (!apps.contains(app.key)) apps.add(app.key);
-        prefs.setFolderApps(id, apps);
-        renderHome();
-    }
-
-    private void moveToNewFolder(AppEntry app, String name) {
-        String item = "a:" + app.key;
-        boolean onHome = prefs.cellOf(item) >= 0;
-        if (!onHome && prefs.grid().size() >= Prefs.MAX_HOME) {
-            toast("На рабочем столе нет места для новой папки");
-            return;
-        }
-        String id = prefs.newFolderId();
-        prefs.setFolderName(id, name);
-        removeFromFolders(app.key);
-        if (prefs.cellOf(item) >= 0) prefs.replaceItem(item, "f:" + id);
-        else if (!prefs.placeItem("f:" + id, -1)) { toast("Нет свободного места"); return; }
-        List<String> apps = new ArrayList<>();
-        apps.add(app.key);
-        prefs.setFolderApps(id, apps);
-        renderHome();
-    }
-
-    private void deleteFolder(String id) {
-        int cell = prefs.cellOf("f:" + id);
-        if (cell < 0) return;
-        List<String> apps = prefs.folderApps(id);
-        prefs.removeItem("f:" + id);
-        prefs.deleteFolderData(id);
-        int dropped = 0;
-        boolean first = true;
-        for (String key : apps) {
-            if (!prefs.placeItem("a:" + key, first ? cell : -1)) dropped++;
-            first = false;
-        }
-        if (dropped > 0) toast("Не поместилось: " + dropped + ". Они остались в списке приложений.");
-        renderHome();
-    }
-
-    // ------------------------------------------------------------------ drawer
-
-    private void openDrawer() {
-        if (drawerOpen) return;
-        drawerOpen = true;
-        search.setText("");
-        list.setSelection(0);
-        drawer.setVisibility(View.VISIBLE);
-        drawer.setAlpha(0f);
-        drawer.setTranslationY(dp(48));
-        drawer.animate().alpha(1f).translationY(0).setDuration(160).start();
-        home.animate().alpha(0f).setDuration(120).start();
-        if (Build.VERSION.SDK_INT >= 33 && backCallback != null) {
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
-        }
-        if (prefs.showKeyboard()) showKeyboard();
-    }
-
-    private void closeDrawer() {
-        if (!drawerOpen) return;
-        drawerOpen = false;
-        hideKeyboard();
-        unregisterBack();
-        drawer.animate().alpha(0f).translationY(dp(48)).setDuration(140)
-                .withEndAction(() -> { if (!drawerOpen) drawer.setVisibility(View.GONE); })
-                .start();
-        home.animate().alpha(1f).setDuration(160).start();
-    }
-
-    /** Мгновенно, без анимации — когда лаунчер уходит с экрана. */
-    private void closeDrawerNow() {
-        if (!drawerOpen) return;
-        drawerOpen = false;
-        hideKeyboard();
-        unregisterBack();
-        drawer.animate().cancel();
-        drawer.setVisibility(View.GONE);
-        home.animate().cancel();
-        home.setAlpha(1f);
-        search.setText("");
-    }
-
-    private void unregisterBack() {
-        if (Build.VERSION.SDK_INT >= 33 && backCallback != null) {
-            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
-        }
-    }
-
-    private void showKeyboard() {
-        search.requestFocus();
-        search.post(() -> {
-            WindowInsetsController c = search.getWindowInsetsController();
-            if (c != null) c.show(WindowInsets.Type.ime());
-        });
-    }
-
-    private void hideKeyboard() {
-        WindowInsetsController c = search.getWindowInsetsController();
-        if (c != null) c.hide(WindowInsets.Type.ime());
-        search.clearFocus();
-    }
-
-    private final class SwipeListener extends GestureDetector.SimpleOnGestureListener {
-        @Override
-        public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
-            if (Math.abs(vy) < Math.abs(vx) * 1.5f || Math.abs(vy) < dp(300)) return false;
-            if (!drawerOpen) {
-                if (vy < 0) openDrawer(); else expandNotifications();
-                return true;
-            }
-            // В списке: свайп вниз, когда он уже прокручен до самого верха, — закрыть.
-            if (vy > 0 && !list.canScrollVertically(-1)) {
-                closeDrawer();
-                return true;
-            }
-            return false;
-        }
-    }
-
-    @SuppressWarnings({"WrongConstant", "JavaReflectionMemberAccess"})
-    private void expandNotifications() {
-        try {
-            Object sb = getSystemService("statusbar");
-            Class.forName("android.app.StatusBarManager")
-                    .getMethod("expandNotificationsPanel").invoke(sb);
-        } catch (Exception ignored) {
-            // На некоторых прошивках метод недоступен — просто ничего не делаем.
-        }
-    }
-
-    // ------------------------------------------------------------------ menus
-
-    private void showDrawerAppMenu(AppEntry app) {
-        hideKeyboard();
-        String pkg = app.packageName();
-        boolean distracting = Guard.isDistracting(prefs, pkg);
-        boolean onHome = prefs.home().contains("a:" + app.key);
-        String folder = prefs.folderOf(app.key);
-        Menu m = new Menu();
-
-        if (!distracting) {
-            if (onHome) {
-                m.add("✕   Убрать с рабочего стола", () -> { removeEverywhere(app.key); renderHome(); });
-            } else if (folder != null) {
-                m.add("✕   Убрать из папки «" + prefs.folderName(folder) + "»",
-                        () -> { removeEverywhere(app.key); renderHome(); });
-            } else {
-                m.add("📌   На рабочий стол", () -> { addToHome(app); renderHome(); });
-            }
-            m.add("📁   В папку…", () -> pickFolder(app));
-        }
-        m.add(distracting ? "⏳   Отвлекающее: да (снять отметку)" : "⏳   Отметить как отвлекающее (пауза " + prefs.pauseSeconds() + " сек)",
-                () -> setDistracting(pkg, !distracting));
-        boolean hidden = prefs.hidden().contains(app.key);
-        m.add(hidden ? "👁   Показывать в списке" : "🙈   Скрыть из списка",
-                () -> { prefs.setHidden(app.key, !hidden); onQueryChanged(); });
-        addCommon(m, app);
-        if (!app.workProfile) {
-            m.add("🗑   Удалить приложение", () -> safeStart(new Intent(Intent.ACTION_DELETE,
-                    Uri.fromParts("package", pkg, null))));
-        }
-        m.show(app.label);
-    }
-
-    private void showHomeAppMenu(AppEntry app) {
-        Menu m = new Menu();
-        m.add("✕   Убрать с рабочего стола", () -> { removeEverywhere(app.key); renderHome(); });
-        m.add("📁   В папку…", () -> pickFolder(app));
-        addCommon(m, app);
-        m.show(app.label);
-    }
-
-    private void showFolderAppMenu(AppEntry app) {
-        Menu m = new Menu();
-        m.add("📤   Вынуть из папки на рабочий стол", () -> {
-            removeFromFolders(app.key);
-            if (!addToHome(app)) toast("Приложение осталось в общем списке");
-            renderHome();
-        });
-        m.add("📁   В другую папку…", () -> pickFolder(app));
-        addCommon(m, app);
-        m.show(app.label);
-    }
-
-    private void showFolderMenu(String id) {
-        Menu m = new Menu();
-        m.add("📂   Открыть", () -> openFolder(id));
-        m.add("✏️   Переименовать папку", () -> askText("Название папки", prefs.folderName(id),
-                name -> { prefs.setFolderName(id, name); renderHome(); }));
-        m.add("🗑   Удалить папку (приложения вернутся на стол)", () -> deleteFolder(id));
-        m.show(prefs.folderName(id));
-    }
-
-    private void addCommon(Menu m, AppEntry app) {
-        m.add("✏️   Переименовать", () -> showRename(app));
-        m.add("ℹ️   О приложении", () -> {
-            try {
-                launcherApps.startAppDetailsActivity(app.component, app.user, null, null);
-            } catch (Exception e) {
-                toast("Не удалось открыть сведения");
-            }
-        });
-    }
-
-    private void setDistracting(String pkg, boolean on) {
-        Set<String> s = prefs.distracting();
-        if (on) s.add(pkg); else s.remove(pkg);
-        prefs.setDistracting(s);
-        if (on) {
-            // Две зоны: убираем с рабочего стола и из папок.
-            for (AppEntry a : allApps) if (a.packageName().equals(pkg)) removeEverywhere(a.key);
-            toast("Теперь только из списка и после паузы " + prefs.pauseSeconds() + " сек");
-        }
-        renderHome();
-        onQueryChanged();
-    }
-
-    private void showRename(AppEntry app) {
-        String current = prefs.rename(app.key);
-        EditText input = new EditText(this);
-        input.setText(current != null ? current : app.originalLabel);
-        input.setSingleLine(true);
-        input.setSelectAllOnFocus(true);
-        FrameLayout box = new FrameLayout(this);
-        box.setPadding(dp(24), dp(8), dp(24), 0);
-        box.addView(input);
-
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Переименовать")
-                .setView(box)
-                .setPositiveButton("Сохранить", (d, w) -> {
-                    prefs.setRename(app.key, input.getText().toString());
-                    refreshNames();
-                })
-                .setNeutralButton("Исходное имя", (d, w) -> {
-                    prefs.setRename(app.key, null);
-                    refreshNames();
-                })
-                .setNegativeButton("Отмена", null)
-                .show();
-    }
-
-    private interface TextResult { void done(String text); }
-
-    private void askText(String title, String initial, TextResult result) {
-        EditText input = new EditText(this);
-        input.setText(initial);
-        input.setSingleLine(true);
-        input.setSelectAllOnFocus(true);
-        FrameLayout box = new FrameLayout(this);
-        box.setPadding(dp(24), dp(8), dp(24), 0);
-        box.addView(input);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(title)
-                .setView(box)
-                .setPositiveButton("Готово", (d, w) -> result.done(input.getText().toString()))
-                .setNegativeButton("Отмена", null)
-                .show();
-    }
-
-    // ------------------------------------------------------------------ settings
-
-    /** Долгое нажатие на пустом месте: панель снизу из трёх плиток, как в Pixel Launcher. */
-    private void showHomePopup() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(dp(8), dp(16), dp(8), dp(16));
-        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setView(row)
-                .create();
-        row.addView(popupTile("🎨", "Обои и стиль", () -> { dialog.dismiss(); showStyleSettings(); }),
-                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(popupTile("🧩", "Виджеты", () -> { dialog.dismiss(); showWidgetSettings(); }),
-                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(popupTile("⚙️", "Настройки", () -> { dialog.dismiss(); showSettings(); }),
-                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        dialog.show();
-        if (dialog.getWindow() != null) dialog.getWindow().setGravity(Gravity.BOTTOM);
-    }
-
-    private View popupTile(String icon, String label, Runnable action) {
-        LinearLayout tile = new LinearLayout(this);
-        tile.setOrientation(LinearLayout.VERTICAL);
-        tile.setGravity(Gravity.CENTER_HORIZONTAL);
-        tile.setPadding(dp(4), dp(12), dp(4), dp(12));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x1FFFFFFF);
-        bg.setCornerRadius(dp(20));
-        TextView ic = new TextView(this);
-        ic.setText(icon);
-        ic.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
-        ic.setGravity(Gravity.CENTER);
-        ic.setBackground(bg);
-        tile.addView(ic, new LinearLayout.LayoutParams(dp(64), dp(64)));
-        TextView tv = new TextView(this);
-        tv.setText(label);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        tv.setTextColor(TEXT);
-        tv.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(8);
-        tile.addView(tv, lp);
-        tile.setOnClickListener(v -> action.run());
-        return tile;
-    }
-
-    private void showStyleSettings() {
-        Menu m = new Menu();
-        m.add("🖼   Сменить обои", () -> safeStart(Intent.createChooser(
-                new Intent(Intent.ACTION_SET_WALLPAPER), "Обои")));
-        m.add("🌑   Фон: " + (prefs.blackTheme() ? "чёрный (OLED)" : "обои"), () -> {
-            prefs.setBlackTheme(!prefs.blackTheme()); applyTheme(); showStyleSettings();
-        });
-        m.add("🎨   Иконки: " + (prefs.grayIcons() ? "чёрно-белые" : "цветные"), () -> {
-            prefs.setGrayIcons(!prefs.grayIcons()); renderHome(); showStyleSettings();
-        });
-        m.add("📅   Показывать дату: " + onOff(prefs.showDate()), () -> {
-            prefs.setShowDate(!prefs.showDate()); applyTheme(); showStyleSettings();
-        });
-        m.show("Обои и стиль");
-    }
-
-    private void showWidgetSettings() {
-        Menu m = new Menu();
-        m.add("➕   Добавить виджет", this::pickWidget);
-        if (!prefs.widgets().isEmpty()) m.add("➖   Убрать виджет", this::removeWidgetDialog);
-        m.show("Виджеты");
-    }
-
-    private void showSettings() {
-        boolean night = Guard.nightActive(prefs);
-        boolean video = Guard.videoActive(prefs);
-        Menu m = new Menu();
-        boolean gray = prefs.grayscale();
-        m.add("⚫   Чёрно-белый экран телефона: " + (gray ? "вкл" : "выкл")
-                + (gray && !Guard.canControlGrayscale(this) ? " (нужно разрешение)" : ""), () -> {
-            if (!gray) {
-                prefs.setGrayscale(true);
-                if (Guard.canControlGrayscale(this)) Guard.setPhoneGrayscale(this, true);
-                else showGrayscaleHelp();
-                showSettings();
-            } else if (!Guard.canControlGrayscale(this)) {
-                showGrayscaleHelp();
-            } else {
-                confirmWithDelay("Выключить чёрно-белый экран?", () -> {
-                    prefs.setGrayscale(false);
-                    Guard.setPhoneGrayscale(this, false);
-                    toast("Цветной экран. Включить обратно — в настройках, сразу.");
-                });
-            }
-        });
-        m.add("⏱   Пауза перед отвлекающими: " + prefs.pauseSeconds() + " сек", this::pickPause);
-        m.add("⏳   Отвлекающие приложения (" + countPackages(prefs.distracting()) + ")", this::editDistracting);
-
-        String videoState;
-        if (!video) videoState = "выкл";
-        else if (prefs.videoUnblockAt() > 0) videoState = "вкл, выключится в " + Guard.nightEndText(prefs);
-        else videoState = "вкл";
-        m.add("🚫   Блок видео и браузеров: " + videoState, this::toggleVideoBlock);
-        m.add("🎬   Что блокировать как видео (" + countPackages(prefs.videoApps()) + ")", this::editVideoApps);
-
-        m.add("🌙   Ночной режим " + Guard.nightRangeText(prefs) + ": "
-                + onOff(prefs.nightMode()) + (night ? " (сейчас ночь)" : ""), () -> {
-            if (!prefs.nightMode()) {
-                prefs.setNightMode(true);
-                updateGuards(true);
-                showSettings();
-            } else if (night) {
-                toast("Ночью выключить нельзя. До " + Guard.nightEndText(prefs) + ".");
-            } else {
-                confirmWithDelay("Выключить ночной режим?", () -> {
-                    prefs.setNightMode(false);
-                    updateGuards(true);
-                });
-            }
-        });
-        m.add("🕘   Время ночного режима: " + Guard.nightRangeText(prefs), this::pickNightHours);
-        m.add("📖   Разрешено ночью (" + countPackages(prefs.nightAllowed()) + " + звонки и будильник)",
-                this::editNightAllowed);
-
-        m.add("⌨️   Клавиатура при открытии списка: " + onOff(prefs.showKeyboard()), () -> {
-            prefs.setShowKeyboard(!prefs.showKeyboard()); showSettings();
-        });
-        m.add("⚡   Автозапуск при одном совпадении: " + onOff(prefs.autoLaunch()), () -> {
-            prefs.setAutoLaunch(!prefs.autoLaunch()); showSettings();
-        });
-        m.add("🙈   Скрытые приложения (" + countHidden() + ")", this::showHiddenApps);
-        m.add("🏠   Сделать лаунчером по умолчанию", this::requestDefaultLauncher);
-        m.add("🔧   Настройки Android", () -> safeStart(new Intent(Settings.ACTION_SETTINGS)));
-        m.show("Настройки");
-    }
-
-    /**
-     * Ослабление ограничений — только после ожидания LOOSEN_DELAY_SECONDS.
-     * Кнопка «Подтвердить» становится активной в конце отсчёта.
-     */
-    private void confirmWithDelay(String title, Runnable action) {
-        final int[] left = {Guard.LOOSEN_DELAY_SECONDS};
-        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(title)
-                .setMessage("Подожди " + Guard.LOOSEN_DELAY_SECONDS + " секунд.\n\n"
-                        + "Если это порыв — просто закрой окно. Если правда нужно — подтверди после отсчёта.")
-                .setNegativeButton("Не надо", null)
-                .setPositiveButton("Подтвердить (" + left[0] + ")", (d, w) -> action.run())
-                .create();
-        dialog.setCanceledOnTouchOutside(false);
-        Runnable tick = new Runnable() {
-            @Override public void run() {
-                if (!dialog.isShowing()) return;
-                Button b = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-                left[0]--;
-                if (left[0] > 0) {
-                    b.setText("Подтвердить (" + left[0] + ")");
-                    main.postDelayed(this, 1000);
-                } else {
-                    b.setText("Подтвердить");
-                    b.setEnabled(true);
-                }
-            }
-        };
-        dialog.setOnShowListener(d -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-            main.postDelayed(tick, 1000);
-        });
-        dialog.setOnDismissListener(d -> main.removeCallbacks(tick));
-        dialog.show();
-    }
-
-    private void pickPause() {
-        int[] values = {5, 10, 15, 20, 30, 45, 60, 90, 120};
-        String[] names = new String[values.length + 1];
-        for (int i = 0; i < values.length; i++) names[i] = values[i] + " сек";
-        names[values.length] = "Своё число…";
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Пауза перед отвлекающими")
-                .setItems(names, (d, which) -> {
-                    if (which < values.length) applyPause(values[which]);
-                    else askText("Сколько секунд?", String.valueOf(prefs.pauseSeconds()), t -> {
-                        try {
-                            applyPause(Integer.parseInt(t.trim()));
-                        } catch (NumberFormatException e) {
-                            toast("Нужно число");
-                        }
-                    });
-                })
-                .show();
-    }
-
-    private void applyPause(int seconds) {
-        int v = Math.max(1, Math.min(600, seconds));
-        if (v >= prefs.pauseSeconds()) {
-            prefs.setPauseSeconds(v);
-            toast("Пауза: " + v + " сек");
-            onQueryChanged();
-        } else {
-            confirmWithDelay("Уменьшить паузу до " + v + " сек?", () -> {
-                prefs.setPauseSeconds(v);
-                toast("Пауза: " + v + " сек");
-            });
-        }
-    }
-
-    private void pickNightHours() {
-        if (Guard.nightActive(prefs)) {
-            toast("Ночью менять нельзя. До " + Guard.nightEndText(prefs) + ".");
-            return;
-        }
-        int oldStart = prefs.nightStart();
-        int oldEnd = prefs.nightEnd();
-        new android.app.TimePickerDialog(this, android.R.style.Theme_DeviceDefault_Dialog_Alert, (v1, h1, m1) -> {
-            int start = h1 * 60 + m1;
-            new android.app.TimePickerDialog(this, android.R.style.Theme_DeviceDefault_Dialog_Alert, (v2, h2, m2) -> {
-                int end = h2 * 60 + m2;
-                if (nightLength(start, end) >= nightLength(oldStart, oldEnd)
-                        && covers(start, end, oldStart, oldEnd)) {
-                    // Ночь стала длиннее и включает прежнюю — это усиление, сразу.
-                    prefs.setNightHours(start, end);
-                    toast("Ночной режим: " + Guard.nightRangeText(prefs));
-                    updateGuards(true);
-                } else {
-                    confirmWithDelay("Ночной режим " + Guard.hhmm(start) + "–" + Guard.hhmm(end) + "?", () -> {
-                        prefs.setNightHours(start, end);
-                        updateGuards(true);
-                    });
-                }
-            }, oldEnd / 60, oldEnd % 60, true) {{ setTitle("Ночной режим заканчивается в…"); }}.show();
-        }, oldStart / 60, oldStart % 60, true) {{ setTitle("Ночной режим начинается в…"); }}.show();
-    }
-
-    private static int nightLength(int start, int end) {
-        return ((end - start) % 1440 + 1440) % 1440;
-    }
-
-    /** Покрывает ли ночь [s1,e1) целиком ночь [s2,e2). */
-    private static boolean covers(int s1, int e1, int s2, int e2) {
-        int len1 = nightLength(s1, e1);
-        int off = ((s2 - s1) % 1440 + 1440) % 1440;
-        return off + nightLength(s2, e2) <= len1;
-    }
-
-    private void showGrayscaleHelp() {
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Нужно разрешение (один раз)")
-                .setMessage("Чтобы лаунчер держал весь телефон чёрно-белым, ему нужно разрешение, "
-                        + "которое выдаётся один раз с компьютера по кабелю.\n\n"
-                        + "Команда для Терминала:\n"
-                        + "adb shell pm grant " + getPackageName() + " android.permission.WRITE_SECURE_SETTINGS\n\n"
-                        + "Пошаговую инструкцию даст Claude. Пока разрешения нет, "
-                        + "можно включить «Оттенки серого» в настройках телефона вручную.")
-                .setPositiveButton("Понятно", null)
-                .show();
-    }
-
-    private void toggleVideoBlock() {
-        if (!Guard.videoActive(prefs)) {
-            prefs.setVideoBlock(true);
-            prefs.setVideoUnblockAt(0);
-            toast("Видео и браузеры заблокированы. Видео — только в Telegram.");
-        } else if (prefs.videoUnblockAt() > 0) {
-            prefs.setVideoUnblockAt(0);
-            toast("Отмена выключения: блок остаётся");
-        } else {
-            prefs.setVideoUnblockAt(Guard.nextMorning(prefs, System.currentTimeMillis()));
-            toast("Блок выключится в " + Guard.nightEndText(prefs) + ". Раньше — никак.");
-        }
-        updateGuards(true);
-        showSettings();
-    }
-
-    /** Уникальные пакеты всех приложений: пакет → имя, по алфавиту. */
-    private LinkedHashMap<String, String> packageLabels() {
-        Map<String, String> m = new HashMap<>();
-        for (AppEntry a : allApps) {
-            if (!m.containsKey(a.packageName())) m.put(a.packageName(), a.label);
-        }
-        List<Map.Entry<String, String>> entries = new ArrayList<>(m.entrySet());
-        Collator collator = Collator.getInstance(Locale.getDefault());
-        collator.setStrength(Collator.PRIMARY);
-        entries.sort((x, y) -> collator.compare(x.getValue(), y.getValue()));
-        LinkedHashMap<String, String> out = new LinkedHashMap<>();
-        for (Map.Entry<String, String> e : entries) out.put(e.getKey(), e.getValue());
-        return out;
-    }
-
-    private interface SetResult { void done(Set<String> chosen, Set<String> before); }
-
-    private void editPackages(String title, Set<String> current, Set<String> exclude, SetResult result) {
-        LinkedHashMap<String, String> pkgs = packageLabels();
-        List<String> keys = new ArrayList<>();
-        for (String p : pkgs.keySet()) if (exclude == null || !exclude.contains(p)) keys.add(p);
-        // Отмеченные — сверху, чтобы сразу было видно, что выбрано.
-        List<String> ordered = new ArrayList<>();
-        for (String p : keys) if (current.contains(p)) ordered.add(p);
-        for (String p : keys) if (!current.contains(p)) ordered.add(p);
-        String[] names = new String[ordered.size()];
-        boolean[] checked = new boolean[ordered.size()];
-        for (int i = 0; i < ordered.size(); i++) {
-            names[i] = pkgs.get(ordered.get(i));
-            checked[i] = current.contains(ordered.get(i));
-        }
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(title)
-                .setMultiChoiceItems(names, checked, (d, which, isChecked) -> checked[which] = isChecked)
-                .setPositiveButton("Готово", (d, w) -> {
-                    Set<String> chosen = new HashSet<>(current);
-                    for (int i = 0; i < ordered.size(); i++) {
-                        if (checked[i]) chosen.add(ordered.get(i)); else chosen.remove(ordered.get(i));
-                    }
-                    result.done(chosen, current);
-                })
-                .setNegativeButton("Отмена", null)
-                .show();
-    }
-
-    private void editDistracting() {
-        editPackages("Отвлекающие (пауза " + prefs.pauseSeconds() + " сек, не на рабочем столе)", prefs.distracting(), null,
-                (chosen, before) -> {
-                    prefs.setDistracting(chosen);
-                    for (AppEntry a : allApps) {
-                        if (chosen.contains(a.packageName()) && !before.contains(a.packageName())) {
-                            removeEverywhere(a.key);
-                        }
-                    }
-                    renderHome();
-                    onQueryChanged();
-                });
-    }
-
-    private void editVideoApps() {
-        editPackages("Блокировать как видео и браузеры", prefs.videoApps(), null, (chosen, before) -> {
-            if (Guard.videoActive(prefs)) {
-                Set<String> removed = new HashSet<>(before);
-                removed.removeAll(chosen);
-                if (!removed.isEmpty()) {
-                    chosen.addAll(removed);
-                    toast("Пока блок включён, убирать из списка нельзя — только добавлять");
-                }
-            }
-            prefs.setVideoApps(chosen);
-            renderHome();
-            onQueryChanged();
-        });
-    }
-
-    private void editNightAllowed() {
-        if (Guard.nightActive(prefs)) {
-            toast("Ночью менять нельзя. До " + Guard.nightEndText(prefs) + ".");
-            return;
-        }
-        Set<String> system = new HashSet<>();
-        for (AppEntry a : allApps) if (Guard.isSystemNightApp(a.packageName())) system.add(a.packageName());
-        editPackages("Разрешено ночью (Библия и т.п.)", prefs.nightAllowed(), system, (chosen, before) -> {
-            prefs.setNightAllowed(chosen);
-            renderHome();
-            onQueryChanged();
-        });
-    }
-
-    private int countPackages(Set<String> pkgs) {
-        Set<String> installed = new HashSet<>();
-        for (AppEntry a : allApps) installed.add(a.packageName());
-        int n = 0;
-        for (String p : pkgs) if (installed.contains(p)) n++;
-        return n;
-    }
-
-    private void showHiddenApps() {
-        Set<String> hidden = prefs.hidden();
-        List<AppEntry> apps = new ArrayList<>();
-        for (AppEntry a : allApps) if (hidden.contains(a.key)) apps.add(a);
-        if (apps.isEmpty()) {
-            toast("Скрытых приложений нет. Скрыть: долгое нажатие в списке.");
-            return;
-        }
-        String[] names = new String[apps.size()];
-        boolean[] checked = new boolean[apps.size()];
-        for (int i = 0; i < apps.size(); i++) { names[i] = apps.get(i).label; checked[i] = true; }
-
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Скрытые (снимите галочку, чтобы вернуть)")
-                .setMultiChoiceItems(names, checked, (d, which, isChecked) -> checked[which] = isChecked)
-                .setPositiveButton("Готово", (d, w) -> {
-                    for (int i = 0; i < apps.size(); i++) {
-                        if (!checked[i]) prefs.setHidden(apps.get(i).key, false);
-                    }
-                    onQueryChanged();
-                })
-                .setNegativeButton("Отмена", null)
-                .show();
-    }
-
-    private int countHidden() {
-        Set<String> hidden = prefs.hidden();
-        int n = 0;
-        for (AppEntry a : allApps) if (hidden.contains(a.key)) n++;
-        return n;
-    }
-
-    // ------------------------------------------------------------------ widgets
-
-    private void renderWidgets() {
-        widgetsBox.removeAllViews();
-        List<Integer> ids = prefs.widgets();
-        List<Integer> alive = new ArrayList<>();
-        for (int id : ids) {
-            AppWidgetProviderInfo info = widgetManager.getAppWidgetInfo(id);
-            if (info == null) continue; // провайдер удалён
-            alive.add(id);
-            AppWidgetHostView v = widgetHost.createView(this, id, info);
-            v.setOnLongClickListener(view -> { confirmRemoveWidget(id, info); return true; });
-            int h = Math.max(info.minHeight, dp(48));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, h);
-            lp.topMargin = dp(12);
-            widgetsBox.addView(v, lp);
-        }
-        if (alive.size() != ids.size()) prefs.setWidgets(alive);
-    }
-
-    private void pickWidget() {
-        if (prefs.widgets().size() >= MAX_WIDGETS) {
-            toast("Максимум " + MAX_WIDGETS + " виджета");
-            return;
-        }
-        List<AppWidgetProviderInfo> providers = new ArrayList<>();
-        for (AppWidgetProviderInfo p : widgetManager.getInstalledProviders()) {
-            if ((p.widgetCategory & AppWidgetProviderInfo.WIDGET_CATEGORY_HOME_SCREEN) != 0) providers.add(p);
-        }
-        if (providers.isEmpty()) {
-            toast("Нет доступных виджетов");
-            return;
-        }
-        Map<AppWidgetProviderInfo, String> labels = new HashMap<>();
-        for (AppWidgetProviderInfo p : providers) {
-            String app;
-            try {
-                app = getPackageManager().getApplicationLabel(getPackageManager()
-                        .getApplicationInfo(p.provider.getPackageName(), 0)).toString();
-            } catch (Exception e) {
-                app = p.provider.getPackageName();
-            }
-            labels.put(p, app + ": " + p.loadLabel(getPackageManager()));
-        }
-        Collator collator = Collator.getInstance(Locale.getDefault());
-        providers.sort((a, b) -> collator.compare(labels.get(a), labels.get(b)));
-        String[] names = new String[providers.size()];
-        for (int i = 0; i < names.length; i++) names[i] = labels.get(providers.get(i));
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Виджет")
-                .setItems(names, (d, which) -> bindWidget(providers.get(which)))
-                .show();
-    }
-
-    @SuppressWarnings("deprecation")
-    private void bindWidget(AppWidgetProviderInfo info) {
-        int id = widgetHost.allocateAppWidgetId();
-        if (widgetManager.bindAppWidgetIdIfAllowed(id, info.getProfile(), info.provider, null)) {
-            configureOrAdd(id);
-            return;
-        }
-        pendingWidgetId = id;
-        Intent i = new Intent(AppWidgetManager.ACTION_APPWIDGET_BIND);
-        i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id);
-        i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, info.provider);
-        i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER_PROFILE, info.getProfile());
-        try {
-            startActivityForResult(i, REQ_BIND);
-        } catch (ActivityNotFoundException e) {
-            widgetHost.deleteAppWidgetId(id);
-            pendingWidgetId = -1;
-            toast("Система не разрешила добавить виджет");
-        }
-    }
-
-    private void configureOrAdd(int id) {
-        AppWidgetProviderInfo info = widgetManager.getAppWidgetInfo(id);
-        if (info != null && info.configure != null) {
-            pendingWidgetId = id;
-            try {
-                widgetHost.startAppWidgetConfigureActivityForResult(this, id, 0, REQ_CONFIG, null);
-                return;
-            } catch (Exception ignored) {
-                // Не открылась настройка — добавляем как есть.
-            }
-        }
-        addWidget(id);
-    }
-
-    private void addWidget(int id) {
-        List<Integer> ids = prefs.widgets();
-        if (!ids.contains(id)) ids.add(id);
-        prefs.setWidgets(ids);
-        pendingWidgetId = -1;
-        renderWidgets();
-    }
-
-    @SuppressWarnings("deprecation")
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        int id = pendingWidgetId;
-        if (requestCode == REQ_BIND) {
-            if (resultCode == RESULT_OK && id != -1) configureOrAdd(id);
-            else dropPendingWidget();
-        } else if (requestCode == REQ_CONFIG) {
-            if (resultCode == RESULT_OK && id != -1) addWidget(id);
-            else dropPendingWidget();
-        }
-    }
-
-    private void dropPendingWidget() {
-        if (pendingWidgetId != -1) widgetHost.deleteAppWidgetId(pendingWidgetId);
-        pendingWidgetId = -1;
-    }
-
-    private void confirmRemoveWidget(int id, AppWidgetProviderInfo info) {
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(info.loadLabel(getPackageManager()))
-                .setItems(new String[]{"Убрать виджет"}, (d, w) -> removeWidget(id))
-                .show();
-    }
-
-    private void removeWidgetDialog() {
-        List<Integer> ids = prefs.widgets();
-        String[] names = new String[ids.size()];
-        for (int i = 0; i < ids.size(); i++) {
-            AppWidgetProviderInfo info = widgetManager.getAppWidgetInfo(ids.get(i));
-            names[i] = info == null ? "Виджет" : info.loadLabel(getPackageManager());
-        }
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Убрать виджет")
-                .setItems(names, (d, which) -> removeWidget(ids.get(which)))
-                .show();
-    }
-
-    private void removeWidget(int id) {
-        List<Integer> ids = prefs.widgets();
-        ids.remove(Integer.valueOf(id));
-        prefs.setWidgets(ids);
-        widgetHost.deleteAppWidgetId(id);
-        renderWidgets();
-    }
-
-    // ------------------------------------------------------------------ default launcher
-
-    private boolean isDefaultLauncher() {
-        RoleManager rm = getSystemService(RoleManager.class);
-        return rm != null && rm.isRoleAvailable(RoleManager.ROLE_HOME)
-                && rm.isRoleHeld(RoleManager.ROLE_HOME);
-    }
-
-    @SuppressWarnings("deprecation")
-    private void requestDefaultLauncher() {
-        RoleManager rm = getSystemService(RoleManager.class);
-        if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_HOME) && !rm.isRoleHeld(RoleManager.ROLE_HOME)) {
-            try {
-                startActivityForResult(rm.createRequestRoleIntent(RoleManager.ROLE_HOME), REQ_DEFAULT);
-                return;
-            } catch (ActivityNotFoundException ignored) {}
-        }
-        safeStart(new Intent(Settings.ACTION_HOME_SETTINGS));
-    }
-
-    private void maybeAskDefaultLauncher() {
-        SharedPreferences sp = getSharedPreferences("launcher", MODE_PRIVATE);
-        if (sp.getBoolean("asked_default", false) || isDefaultLauncher()) return;
-        sp.edit().putBoolean("asked_default", true).apply();
-        main.postDelayed(this::requestDefaultLauncher, 600);
-    }
-
-    // ------------------------------------------------------------------ system events
-
-    private final LauncherApps.Callback packageCallback = new LauncherApps.Callback() {
-        @Override public void onPackageRemoved(String p, UserHandle u) { reloadApps(); }
-        @Override public void onPackageAdded(String p, UserHandle u) { reloadApps(); }
-        @Override public void onPackageChanged(String p, UserHandle u) { reloadApps(); }
-        @Override public void onPackagesAvailable(String[] p, UserHandle u, boolean r) { reloadApps(); }
-        @Override public void onPackagesUnavailable(String[] p, UserHandle u, boolean r) { reloadApps(); }
-        @Override public void onPackagesSuspended(String[] p, UserHandle u) { reloadApps(); }
-        @Override public void onPackagesUnsuspended(String[] p, UserHandle u) { reloadApps(); }
-    };
-
-    private final BroadcastReceiver profileReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context c, Intent i) { reloadApps(); }
-    };
-
-    /** Каждую минуту: наступила ли ночь/утро, не пора ли снять блок видео. */
-    private final BroadcastReceiver timeReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context c, Intent i) {
-            Guard.enforceGrayscale(MainActivity.this, prefs);
-            updateGuards(false);
-        }
-    };
-
-    // ------------------------------------------------------------------ helpers
-
-    /** Простое меню: пункты и действия. */
-    private final class Menu {
-        private final List<String> items = new ArrayList<>();
-        private final List<Runnable> actions = new ArrayList<>();
-
-        void add(String title, Runnable action) {
-            items.add(title);
-            actions.add(action);
-        }
-
-        void show(CharSequence title) {
-            new AlertDialog.Builder(MainActivity.this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle(title)
-                    .setItems(items.toArray(new String[0]), (d, which) -> actions.get(which).run())
-                    .show();
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    private void enableEdgeToEdgeLegacy() {
-        getWindow().setDecorFitsSystemWindows(false);
-    }
-
-    private final class AppAdapter extends BaseAdapter {
-        @Override public int getCount() { return filtered.size(); }
-        @Override public Object getItem(int i) { return filtered.get(i); }
-        @Override public long getItemId(int i) { return i; }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-            LinearLayout row = convertView instanceof LinearLayout ? (LinearLayout) convertView : null;
-            ImageView iv;
-            TextView tv;
-            if (row == null) {
-                row = new LinearLayout(MainActivity.this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(dp(4), dp(7), dp(4), dp(7));
-                iv = new ImageView(MainActivity.this);
-                row.addView(iv, new LinearLayout.LayoutParams(dp(42), dp(42)));
-                tv = new TextView(MainActivity.this);
-                style(tv, 19, TEXT);
-                tv.setShadowLayer(8f, 0f, 1f, 0xAA000000);
-                tv.setSingleLine(true);
-                tv.setEllipsize(TextUtils.TruncateAt.END);
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
-                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-                lp.leftMargin = dp(16);
-                row.addView(tv, lp);
-            } else {
-                iv = (ImageView) row.getChildAt(0);
-                tv = (TextView) row.getChildAt(1);
-            }
-            AppEntry a = filtered.get(position);
-            bindIcon(iv, a);
-            boolean blocked = Guard.blockReason(prefs, a.packageName()) != null;
-            tv.setText(Guard.isDistracting(prefs, a.packageName()) ? a.label + "  ⏳" : a.label);
-            float alpha = prefs.hidden().contains(a.key) ? 0.5f : 1f;
-            row.setAlpha(blocked ? 0.35f : alpha);
-            return row;
-        }
-    }
-
-    private void style(TextView tv, int sp, int color) {
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
-        tv.setTextColor(color);
-        tv.setGravity(Gravity.START);
-        // Лёгкая тень, чтобы текст читался на светлых обоях.
-        tv.setShadowLayer(6f, 0f, 1f, 0x66000000);
-    }
-
-    private LinearLayout.LayoutParams wrap() {
-        return new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private LinearLayout.LayoutParams matchWrap() {
-        return new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
-    }
-
-    private void safeStart(Intent intent) {
-        try {
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
-        } catch (Exception e) {
-            toast("Нет подходящего приложения");
-        }
+    private TextView bullet(String s) {
+        TextView t = Ui.text(this, "•  " + s, 15, Ui.INK, false);
+        t.setPadding(0, dp(4), 0, dp(4));
+        return t;
     }
 
     private void toast(String s) {
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
     }
 
-    private static String onOff(boolean b) {
-        return b ? "вкл" : "выкл";
+    // ================================================================== код владельца ключа
+
+    /** Выполняет действие только после правильного одноразового кода. Без ключа — сразу. */
+    private void requireCode(String why, Runnable ok) {
+        if (prefs.secret() == null) {
+            ok.run();
+            return;
+        }
+        LinearLayout c = Ui.col(this);
+        c.setGravity(Gravity.CENTER_HORIZONTAL);
+        c.addView(Ui.image(this, R.drawable.ill_key, 84));
+        TextView t = Ui.text(this, "Нужен код", 22, Ui.INK, true);
+        c.addView(t, Ui.lp(this, WRAP, WRAP, 10));
+        TextView w = Ui.text(this, why + "\nПопроси 6 цифр из Google Authenticator у владельца ключа.", 15, Ui.SUB, false);
+        w.setGravity(Gravity.CENTER);
+        c.addView(w, Ui.lp(this, WRAP, WRAP, 4));
+        EditText et = codeField();
+        c.addView(et, Ui.lp(this, MATCH, WRAP, 16));
+        TextView err = Ui.text(this, "", 14, Ui.RED, false);
+        err.setGravity(Gravity.CENTER);
+        err.setVisibility(View.GONE);
+        c.addView(err, Ui.lp(this, MATCH, WRAP, 8));
+        TextView btn = Ui.button(this, "Подтвердить", Ui.BTN_PRIMARY);
+        c.addView(btn, Ui.lp(this, MATCH, WRAP, 14));
+        Dialog d = Ui.sheet(this, c);
+        if (d.getWindow() != null) d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE
+                | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        et.requestFocus();
+        Runnable check = () -> {
+            if (Totp.verify(prefs, prefs.secret(), et.getText().toString())) {
+                d.dismiss();
+                ok.run();
+            } else {
+                err.setText("Код неверный или уже использован. Попроси новый.");
+                err.setVisibility(View.VISIBLE);
+                et.setText("");
+            }
+        };
+        btn.setOnClickListener(v -> check.run());
+        et.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b2, int c2) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b2, int c2) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (s.length() == 6) check.run();
+            }
+        });
+    }
+
+    private EditText codeField() {
+        EditText et = new EditText(this);
+        et.setInputType(InputType.TYPE_CLASS_NUMBER);
+        et.setFilters(new InputFilter[]{new InputFilter.LengthFilter(6)});
+        et.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
+        et.setLetterSpacing(0.35f);
+        et.setGravity(Gravity.CENTER);
+        et.setTypeface(Typeface.MONOSPACE);
+        et.setTextColor(Ui.INK);
+        et.setHint("••••••");
+        et.setHintTextColor(0xFFCBD5E1);
+        et.setBackground(Ui.round(0xFFFFFFFF, dp(18)));
+        et.setPadding(dp(12), dp(14), dp(12), dp(14));
+        return et;
+    }
+
+    // ================================================================== настройка шагов
+
+    private boolean guardOn() { return GuardService.instance != null; }
+    private boolean filterOn() { return FilterVpn.running; }
+    private boolean keyOn() { return prefs.secret() != null; }
+
+    private ComponentName admin() { return new ComponentName(this, AdminReceiver.class); }
+
+    private boolean adminOn() {
+        DevicePolicyManager dpm = getSystemService(DevicePolicyManager.class);
+        return dpm != null && dpm.isAdminActive(admin());
+    }
+
+    private void startFilter() {
+        GuardService.setupBypassUntil = System.currentTimeMillis() + 90_000;
+        Intent i = VpnService.prepare(this);
+        if (i != null) {
+            try {
+                startActivityForResult(i, REQ_VPN);
+            } catch (Exception e) {
+                toast("Не получилось открыть запрос VPN");
+            }
+        } else {
+            FilterVpn.start(this);
+            handler.postDelayed(this::render, 800);
+        }
+    }
+
+    private void requestAdmin() {
+        GuardService.setupBypassUntil = System.currentTimeMillis() + 90_000;
+        Intent i = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin())
+                .putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                        "Пока включено, «Фокус» нельзя удалить без кода владельца ключа.");
+        try {
+            startActivityForResult(i, REQ_ADMIN);
+        } catch (Exception e) {
+            toast("Не получилось открыть настройку");
+        }
+    }
+
+    private void openGuardSettings() {
+        LinearLayout c = Ui.col(this);
+        c.setGravity(Gravity.CENTER_HORIZONTAL);
+        c.addView(Ui.image(this, R.drawable.ill_shield, 96));
+        c.addView(Ui.text(this, "Включи защиту", 22, Ui.INK, true), Ui.lp(this, WRAP, WRAP, 10));
+        TextView s = Ui.text(this,
+                "1. Нажми «Открыть настройки».\n"
+                        + "2. Найди «Фокус — защита» (иногда в «Установленные приложения»).\n"
+                        + "3. Включи и подтверди.\n\n"
+                        + "Если переключатель серый: Настройки → Приложения → Фокус → ⋮ (вверху справа) → "
+                        + "«Разрешить ограниченные настройки», затем снова сюда.", 15, Ui.SUB, false);
+        c.addView(s, Ui.lp(this, MATCH, WRAP, 8));
+        TextView b = Ui.button(this, "Открыть настройки", Ui.BTN_PRIMARY);
+        c.addView(b, Ui.lp(this, MATCH, WRAP, 16));
+        Dialog d = Ui.sheet(this, c);
+        b.setOnClickListener(v -> {
+            d.dismiss();
+            GuardService.setupBypassUntil = System.currentTimeMillis() + 120_000;
+            try {
+                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            } catch (Exception e) {
+                toast("Открой: Настройки → Специальные возможности");
+            }
+        });
+    }
+
+    private int stepsDone() {
+        int n = 0;
+        if (keyOn()) n++;
+        if (guardOn()) n++;
+        if (filterOn()) n++;
+        if (adminOn()) n++;
+        return n;
+    }
+
+    // ================================================================== главная
+
+    private void home() {
+        LinearLayout col = page(null);
+
+        LinearLayout head = Ui.row(this);
+        head.setPadding(dp(4), dp(18), dp(4), dp(14));
+        LinearLayout ht = Ui.col(this);
+        ht.addView(Ui.text(this, "Фокус", 32, Ui.INK, true));
+        String date = new SimpleDateFormat("EEEE, d MMMM", Locale.forLanguageTag("ru")).format(new Date());
+        ht.addView(Ui.text(this, date.substring(0, 1).toUpperCase(Locale.ROOT) + date.substring(1), 15, Ui.SUB, false));
+        head.addView(ht, new LinearLayout.LayoutParams(0, WRAP, 1));
+        col.addView(head);
+
+        // ---- главная карточка
+        int done = stepsDone();
+        boolean ok = done == 4;
+        LinearLayout hero = Ui.row(this);
+        hero.setPadding(dp(22), dp(22), dp(16), dp(22));
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                ok ? new int[]{Ui.ACCENT, Ui.ACCENT2} : new int[]{0xFFF43F5E, 0xFFF59E0B});
+        g.setCornerRadius(dp(28));
+        hero.setBackground(g);
+        hero.setElevation(dp(3));
+        LinearLayout htxt = Ui.col(this);
+        htxt.addView(Ui.text(this, ok ? "Защита включена" : "Настрой защиту", 24, 0xFFFFFFFF, true));
+        htxt.addView(Ui.text(this, ok ? summary() : "Готово " + done + " из 4 шагов", 15, 0xE6FFFFFF, false),
+                Ui.lp(this, WRAP, WRAP, 6));
+        hero.addView(htxt, new LinearLayout.LayoutParams(0, WRAP, 1));
+        hero.addView(Ui.image(this, ok ? R.drawable.ill_shield : R.drawable.ill_setup, 92));
+        col.addView(hero);
+
+        // ---- шаги настройки
+        if (!ok) {
+            LinearLayout card = section(col, "Шаги настройки");
+            step(card, 1, "Ключ Google Authenticator", "Коды для отключения будут только у жены", keyOn(), () -> open(keyPage));
+            divider(card);
+            step(card, 2, "Защита приложений", "Специальные возможности → «Фокус — защита»", guardOn(), this::openGuardSettings);
+            divider(card);
+            step(card, 3, "Фильтр видео", "Закрывает видеосайты в любом браузере", filterOn(), this::startFilter);
+            divider(card);
+            step(card, 4, "Защита от удаления", "Без кода «Фокус» не удалить", adminOn(), this::requestAdmin);
+        }
+
+        // ---- временный доступ сейчас
+        Map<String, Long> active = prefs.activeUnlocks();
+        if (!active.isEmpty()) {
+            LinearLayout card = section(col, "Сейчас открыто");
+            activeUnlocksList(card, active);
+        }
+
+        // ---- плитки
+        TextView h = Ui.text(this, "Ограничения", 14, Ui.SUB, true);
+        h.setPadding(dp(6), 0, 0, 0);
+        col.addView(h, Ui.lp(this, WRAP, WRAP, 20));
+
+        boolean vf = Guard.videoFilterActive(prefs);
+        String videoState = vf ? "Заблокировано" : prefs.videoBlock() ? "Открыто временно" : "Выключено";
+        int videoColor = vf ? Ui.RED : prefs.videoBlock() ? Ui.AMBER : Ui.SUB;
+        int rules = 0;
+        for (String r : prefs.rules().values()) if (!"allow".equals(r)) rules++;
+        String nightState = !prefs.nightMode() ? "Выключен" : Guard.nightNow(prefs) ? "Сейчас ночь" : Guard.nightRange(prefs);
+
+        LinearLayout r1 = Ui.row(this);
+        tile(r1, R.drawable.ill_video_off, 0xFFFFE4E6, "Видео", videoState, videoColor, () -> open(videoPage));
+        tile(r1, R.drawable.ill_apps, 0xFFDCFCE7, "Приложения", rules == 0 ? "Нет правил" : rulesText(rules), Ui.GREEN, () -> open(appsPage));
+        col.addView(r1, Ui.lp(this, MATCH, WRAP, 8));
+        LinearLayout r2 = Ui.row(this);
+        tile(r2, R.drawable.ill_moon, 0xFFE0E7FF, "Ночь", nightState, Ui.ACCENT, () -> open(nightPage));
+        tile(r2, R.drawable.ill_gray, 0xFFF1F5F9, "Чёрно-белый", prefs.grayscale() ? "Включён" : "Выключен", Ui.INK, () -> open(grayPage));
+        col.addView(r2, Ui.lp(this, MATCH, WRAP, 12));
+        LinearLayout r3 = Ui.row(this);
+        tile(r3, R.drawable.ill_unlock, 0xFFE0F2FE, "Доступ", active.isEmpty() ? "По коду" : "Открыто", 0xFF0369A1, () -> open(unlockPage));
+        tile(r3, R.drawable.ill_key, 0xFFEDE9FE, "Ключ", keyOn() ? "Настроен" : "Не настроен", keyOn() ? Ui.GREEN : Ui.RED, () -> open(keyPage));
+        col.addView(r3, Ui.lp(this, MATCH, WRAP, 12));
+
+        TextView foot = Ui.text(this, "Ужесточить можно всегда. Ослабить — только по коду из Google Authenticator владельца ключа.",
+                13, Ui.SUB, false);
+        foot.setGravity(Gravity.CENTER);
+        foot.setPadding(dp(16), 0, dp(16), 0);
+        col.addView(foot, Ui.lp(this, MATCH, WRAP, 22));
+    }
+
+    private String rulesText(int n) {
+        int m10 = n % 10, m100 = n % 100;
+        String w = (m10 == 1 && m100 != 11) ? "правило" : (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) ? "правила" : "правил";
+        return n + " " + w;
+    }
+
+    private String summary() {
+        List<String> parts = new ArrayList<>();
+        parts.add(Guard.videoFilterActive(prefs) ? "Видео закрыто" : "Видео открыто");
+        if (prefs.nightMode()) parts.add("ночь " + Guard.nightRange(prefs));
+        if (prefs.grayscale()) parts.add("ч/б экран");
+        return String.join(" · ", parts);
+    }
+
+    private void step(LinearLayout card, int n, String title, String sub, boolean done, Runnable action) {
+        LinearLayout row = Ui.row(this);
+        TextView num = Ui.text(this, done ? "✓" : String.valueOf(n), 16, done ? 0xFFFFFFFF : Ui.ACCENT, true);
+        num.setGravity(Gravity.CENTER);
+        num.setBackground(Ui.round(done ? 0xFF22C55E : Ui.ACCENT_SOFT, dp(16)));
+        row.addView(num, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        LinearLayout txt = Ui.col(this);
+        txt.setPadding(dp(12), 0, dp(8), 0);
+        txt.addView(Ui.text(this, title, 16, done ? Ui.SUB : Ui.INK, true));
+        txt.addView(Ui.text(this, sub, 13, Ui.SUB, false));
+        row.addView(txt, new LinearLayout.LayoutParams(0, WRAP, 1));
+        if (!done) {
+            TextView b = Ui.button(this, "Сделать", Ui.BTN_PRIMARY);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            b.setPadding(dp(14), dp(8), dp(14), dp(8));
+            b.setOnClickListener(v -> action.run());
+            row.addView(b);
+        }
+        card.addView(row);
+    }
+
+    private void tile(LinearLayout row, int ill, int soft, String title, String state, int stateColor, Runnable click) {
+        LinearLayout t = Ui.col(this);
+        t.setPadding(dp(16), dp(16), dp(16), dp(16));
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{soft, 0xFFFFFFFF});
+        g.setCornerRadius(dp(24));
+        t.setBackground(g);
+        t.setElevation(dp(1));
+        t.addView(Ui.image(this, ill, 64));
+        t.addView(Ui.text(this, title, 17, Ui.INK, true), Ui.lp(this, WRAP, WRAP, 10));
+        TextView s = Ui.text(this, state, 14, stateColor, false);
+        s.setSingleLine(true);
+        t.addView(s, Ui.lp(this, WRAP, WRAP, 2));
+        Ui.clickable(t, 24, click);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, WRAP, 1);
+        p.leftMargin = row.getChildCount() == 0 ? 0 : dp(6);
+        p.rightMargin = row.getChildCount() == 0 ? dp(6) : 0;
+        row.addView(t, p);
+    }
+
+    private void activeUnlocksList(LinearLayout card, Map<String, Long> active) {
+        boolean first = true;
+        for (Map.Entry<String, Long> e : active.entrySet()) {
+            if (!first) divider(card);
+            first = false;
+            String scope = e.getKey();
+            String name = "all".equals(scope) ? "Всё" : "video".equals(scope) ? "Видео"
+                    : scope.startsWith("app:") ? AppRepository.label(this, scope.substring(4)) : scope;
+            LinearLayout row = Ui.row(this);
+            LinearLayout txt = Ui.col(this);
+            txt.addView(Ui.text(this, name, 16, Ui.INK, true));
+            txt.addView(Ui.text(this, "до " + Guard.clock(e.getValue()), 14, Ui.AMBER, false));
+            row.addView(txt, new LinearLayout.LayoutParams(0, WRAP, 1));
+            TextView b = Ui.button(this, "Закрыть", Ui.BTN_SOFT);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            b.setPadding(dp(14), dp(8), dp(14), dp(8));
+            b.setOnClickListener(v -> {
+                prefs.setUntil(scope, 0);
+                render();
+            });
+            row.addView(b);
+            card.addView(row);
+        }
+    }
+
+    // ================================================================== видео
+
+    private void videoPage() {
+        LinearLayout col = page("Видео");
+        boolean vf = Guard.videoFilterActive(prefs);
+        hero(col, R.drawable.ill_video_off, 0xFFFFE4E6,
+                vf ? "Видео заблокировано" : prefs.videoBlock() ? "Видео открыто временно" : "Видео не блокируется",
+                "YouTube, TikTok, VK Видео, Rutube, Netflix, Кинопоиск, Twitch и другие — в любом браузере и приложении.");
+
+        LinearLayout card = section(col, null);
+        toggleRow(card, "Блокировать всё видео", "Включить — сразу. Выключить — по коду.", prefs.videoBlock(), () -> {
+            if (prefs.videoBlock()) {
+                requireCode("Выключить блок видео.", () -> {
+                    prefs.setVideoBlock(false);
+                    render();
+                });
+            } else {
+                prefs.setVideoBlock(true);
+                render();
+            }
+        });
+        divider(card);
+        toggleRow(card, "Видео внутри Notion", "Детские песни, вставленные в страницы Notion, играют. Ссылки из Notion в YouTube — закрыты.",
+                prefs.notionVideo(), () -> {
+                    if (!prefs.notionVideo()) {
+                        requireCode("Разрешить видео внутри Notion.", () -> {
+                            prefs.setNotionVideo(true);
+                            FilterVpn.restart(this);
+                            render();
+                        });
+                    } else {
+                        prefs.setNotionVideo(false);
+                        FilterVpn.restart(this);
+                        render();
+                    }
+                });
+
+        LinearLayout st = section(col, "Как работает");
+        statusRow(st, "Фильтр сети", filterOn(), "Видеосайты закрыты во всём телефоне", "Выключен — браузеры закрыты, пока не включишь", this::startFilter);
+        divider(st);
+        statusRow(st, "Проверка адресной строки", guardOn(), "Видео закрывается в любом браузере", "Нужна защита в «Специальных возможностях»", this::openGuardSettings);
+
+        LinearLayout what = section(col, "Что закрыто");
+        what.addView(bullet("Видеосайты в любом браузере: Chrome, Яндекс, Samsung, Firefox, Edge…"));
+        what.addView(bullet("Приложения YouTube, TikTok, VK, Instagram, Rutube, Кинопоиск, видеоплееры"));
+        what.addView(bullet("Браузеры со встроенным VPN (Opera, Tor, UC…) и VPN-приложения"));
+        what.addView(bullet("Обходы: «защищённый DNS», зеркала YouTube, скачивалки видео"));
+        what.addView(bullet("Telegram открыт: сами сообщения и видео в нём не блокируются"));
+
+        List<AppEntry> found = new ArrayList<>();
+        for (AppEntry a : apps) if (Lists.isVideoApp(a.pkg) || Lists.isBypassApp(a.pkg)) found.add(a);
+        if (!found.isEmpty()) {
+            LinearLayout list = section(col, "Закрыто на этом телефоне");
+            for (int i = 0; i < found.size(); i++) {
+                if (i > 0) divider(list);
+                AppEntry a = found.get(i);
+                LinearLayout row = Ui.row(this);
+                ImageView ic = new ImageView(this);
+                ic.setImageDrawable(AppRepository.icon(this, a));
+                row.addView(ic, new LinearLayout.LayoutParams(dp(36), dp(36)));
+                TextView l = Ui.text(this, a.label, 16, Ui.INK, false);
+                l.setPadding(dp(12), 0, 0, 0);
+                row.addView(l, new LinearLayout.LayoutParams(0, WRAP, 1));
+                row.addView(Ui.chip(this, vf ? "закрыто" : "открыто", vf ? Ui.RED : Ui.AMBER, vf ? Ui.RED_SOFT : Ui.AMBER_SOFT));
+                list.addView(row);
+            }
+        }
+    }
+
+    // ================================================================== приложения
+
+    private void appsPage() {
+        LinearLayout col = page("Приложения");
+        hero(col, R.drawable.ill_apps, 0xFFDCFCE7, "Правила для приложений",
+                "Пауза перед открытием, лимит в день, расписание или полный запрет — для любого приложения.");
+        EditText search = new EditText(this);
+        search.setHint("Поиск приложения");
+        search.setSingleLine(true);
+        search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        search.setBackground(Ui.round(0xFFFFFFFF, dp(18)));
+        search.setPadding(dp(16), dp(14), dp(16), dp(14));
+        col.addView(search, Ui.lp(this, MATCH, WRAP, 14));
+        LinearLayout list = Ui.card(this);
+        list.setPadding(dp(12), dp(8), dp(12), dp(8));
+        col.addView(list, Ui.lp(this, MATCH, WRAP, 12));
+        Runnable fill = () -> fillApps(list, search.getText().toString());
+        search.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(Editable s) { fill.run(); }
+        });
+        fill.run();
+    }
+
+    private void fillApps(LinearLayout list, String query) {
+        list.removeAllViews();
+        String q = query.trim().toLowerCase(Locale.ROOT);
+        // сначала приложения с правилами, потом остальные
+        List<AppEntry> withRule = new ArrayList<>(), rest = new ArrayList<>();
+        for (AppEntry a : apps) {
+            if (!q.isEmpty() && !a.label.toLowerCase(Locale.ROOT).contains(q)) continue;
+            boolean has = !"allow".equals(prefs.rule(a.pkg)) || Lists.isVideoApp(a.pkg) || Lists.isBypassApp(a.pkg);
+            (has ? withRule : rest).add(a);
+        }
+        withRule.addAll(rest);
+        for (AppEntry a : withRule) {
+            LinearLayout row = Ui.row(this);
+            row.setPadding(dp(6), dp(10), dp(6), dp(10));
+            ImageView ic = new ImageView(this);
+            ic.setImageDrawable(AppRepository.icon(this, a));
+            row.addView(ic, new LinearLayout.LayoutParams(dp(42), dp(42)));
+            TextView l = Ui.text(this, a.label, 16, Ui.INK, false);
+            l.setPadding(dp(14), 0, dp(8), 0);
+            l.setSingleLine(true);
+            row.addView(l, new LinearLayout.LayoutParams(0, WRAP, 1));
+            if (prefs.videoBlock() && (Lists.isVideoApp(a.pkg) || Lists.isBypassApp(a.pkg))) {
+                row.addView(Ui.chip(this, "Видео — закрыто", Ui.RED, Ui.RED_SOFT));
+            } else {
+                Rule r = Rule.parse(prefs.rule(a.pkg));
+                row.addView(Ui.chip(this, r.type == Rule.ALLOW ? "—" : r.describe(), r.color(), r.soft()));
+            }
+            Ui.clickable(row, 16, () -> ruleSheet(a));
+            list.addView(row);
+        }
+        if (withRule.isEmpty()) {
+            TextView none = Ui.text(this, "Ничего не найдено", 15, Ui.SUB, false);
+            none.setPadding(dp(8), dp(12), dp(8), dp(12));
+            list.addView(none);
+        }
+    }
+
+    private void ruleSheet(AppEntry a) {
+        Rule old = Rule.parse(prefs.rule(a.pkg));
+        final int[] type = {old.type};
+        final int[] pause = {old.type == Rule.PAUSE ? old.a : 20};
+        final int[] limit = {old.type == Rule.LIMIT ? old.a : 15};
+        final int[] from = {old.type == Rule.SCHED ? old.a : 9 * 60};
+        final int[] to = {old.type == Rule.SCHED ? old.b : 18 * 60};
+
+        LinearLayout c = Ui.col(this);
+        LinearLayout head = Ui.row(this);
+        ImageView ic = new ImageView(this);
+        ic.setImageDrawable(AppRepository.icon(this, a));
+        head.addView(ic, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout ht = Ui.col(this);
+        ht.setPadding(dp(14), 0, 0, 0);
+        ht.addView(Ui.text(this, a.label, 21, Ui.INK, true));
+        long used = prefs.usedToday(a.pkg) / 60_000;
+        ht.addView(Ui.text(this, "Сегодня: " + used + " мин", 14, Ui.SUB, false));
+        head.addView(ht, new LinearLayout.LayoutParams(0, WRAP, 1));
+        c.addView(head);
+
+        if (prefs.videoBlock() && (Lists.isVideoApp(a.pkg) || Lists.isBypassApp(a.pkg))) {
+            TextView v = Ui.text(this, "Это видеоприложение: пока включён блок видео, оно закрыто при любом правиле.", 14, Ui.RED, false);
+            v.setBackground(Ui.round(Ui.RED_SOFT, dp(14)));
+            v.setPadding(dp(12), dp(10), dp(12), dp(10));
+            c.addView(v, Ui.lp(this, MATCH, WRAP, 12));
+        }
+
+        LinearLayout opts = Ui.col(this);
+        c.addView(opts, Ui.lp(this, MATCH, WRAP, 12));
+        TextView save = Ui.button(this, "Сохранить", Ui.BTN_PRIMARY);
+        c.addView(save, Ui.lp(this, MATCH, WRAP, 14));
+
+        Runnable[] draw = new Runnable[1];
+        draw[0] = () -> {
+            opts.removeAllViews();
+            int[][] items = {{Rule.ALLOW}, {Rule.PAUSE}, {Rule.LIMIT}, {Rule.SCHED}, {Rule.BLOCK}};
+            for (int[] it : items) {
+                int t = it[0];
+                Rule sample = new Rule(t, t == Rule.PAUSE ? pause[0] : limit[0], 0);
+                String title, sub;
+                switch (t) {
+                    case Rule.PAUSE: title = "Пауза перед открытием"; sub = "Экран ожидания, потом можно открыть"; break;
+                    case Rule.LIMIT: title = "Лимит в день"; sub = "Потом закрыто до завтра"; break;
+                    case Rule.SCHED: title = "Расписание"; sub = "Закрыто в выбранные часы"; break;
+                    case Rule.BLOCK: title = "Заблокировать"; sub = "Не открывается совсем"; break;
+                    default: title = "Без ограничений"; sub = "Открывается как обычно"; break;
+                }
+                boolean sel = type[0] == t;
+                LinearLayout o = Ui.col(this);
+                o.setPadding(dp(14), dp(12), dp(14), dp(12));
+                GradientDrawable bg = Ui.round(sel ? sample.soft() : 0xFFFFFFFF, dp(18));
+                bg.setStroke(dp(sel ? 2 : 1), sel ? sample.color() : Ui.LINE);
+                o.setBackground(bg);
+                LinearLayout r = Ui.row(this);
+                r.addView(Ui.image(this, sample.illustration(), 40));
+                LinearLayout tx = Ui.col(this);
+                tx.setPadding(dp(12), 0, 0, 0);
+                tx.addView(Ui.text(this, title, 16, Ui.INK, true));
+                tx.addView(Ui.text(this, sub, 13, Ui.SUB, false));
+                r.addView(tx, new LinearLayout.LayoutParams(0, WRAP, 1));
+                o.addView(r);
+                if (sel && t == Rule.PAUSE) o.addView(stepper(pause, 5, 5, 300, " сек", draw[0]), Ui.lp(this, MATCH, WRAP, 10));
+                if (sel && t == Rule.LIMIT) o.addView(stepper(limit, 5, 5, 600, " мин", draw[0]), Ui.lp(this, MATCH, WRAP, 10));
+                if (sel && t == Rule.SCHED) {
+                    LinearLayout times = Ui.row(this);
+                    TextView f = Ui.button(this, "с " + Guard.hhmm(from[0]), Ui.BTN_WHITE);
+                    TextView e = Ui.button(this, "до " + Guard.hhmm(to[0]), Ui.BTN_WHITE);
+                    f.setOnClickListener(v -> pickTime(from[0], m -> { from[0] = m; draw[0].run(); }));
+                    e.setOnClickListener(v -> pickTime(to[0], m -> { to[0] = m; draw[0].run(); }));
+                    times.addView(f, Ui.weight(this, 0));
+                    View gap = new View(this);
+                    times.addView(gap, new LinearLayout.LayoutParams(dp(10), 1));
+                    times.addView(e, Ui.weight(this, 0));
+                    o.addView(times, Ui.lp(this, MATCH, WRAP, 10));
+                }
+                o.setOnClickListener(v -> {
+                    if (type[0] != t) {
+                        type[0] = t;
+                        draw[0].run();
+                    }
+                });
+                opts.addView(o, Ui.lp(this, MATCH, WRAP, 8));
+            }
+        };
+        draw[0].run();
+        Dialog d = Ui.sheet(this, c);
+        save.setOnClickListener(v -> {
+            int t = type[0];
+            Rule now = new Rule(t, t == Rule.PAUSE ? pause[0] : t == Rule.LIMIT ? limit[0] : t == Rule.SCHED ? from[0] : 0,
+                    t == Rule.SCHED ? to[0] : 0);
+            Runnable apply = () -> {
+                prefs.setRule(a.pkg, now.encode());
+                d.dismiss();
+                render();
+            };
+            if (Rule.notLooser(old, now)) apply.run();
+            else requireCode("Ослабить правило для «" + a.label + "».", apply);
+        });
+    }
+
+    private View stepper(int[] value, int step, int min, int max, String unit, Runnable changed) {
+        LinearLayout r = Ui.row(this);
+        r.setGravity(Gravity.CENTER);
+        TextView minus = Ui.button(this, "−", Ui.BTN_WHITE);
+        TextView plus = Ui.button(this, "+", Ui.BTN_WHITE);
+        TextView v = Ui.text(this, value[0] + unit, 20, Ui.INK, true);
+        v.setGravity(Gravity.CENTER);
+        minus.setOnClickListener(x -> {
+            value[0] = Math.max(min, value[0] - step);
+            changed.run();
+        });
+        plus.setOnClickListener(x -> {
+            value[0] = Math.min(max, value[0] + step);
+            changed.run();
+        });
+        r.addView(minus, new LinearLayout.LayoutParams(dp(56), WRAP));
+        r.addView(v, new LinearLayout.LayoutParams(0, WRAP, 1));
+        r.addView(plus, new LinearLayout.LayoutParams(dp(56), WRAP));
+        return r;
+    }
+
+    private void pickTime(int minutes, Consumer<Integer> done) {
+        new TimePickerDialog(this, (tp, h, m) -> done.accept(h * 60 + m), minutes / 60, minutes % 60, true).show();
+    }
+
+    private void appPicker(String title, Consumer<AppEntry> picked) {
+        LinearLayout c = Ui.col(this);
+        c.addView(Ui.text(this, title, 20, Ui.INK, true));
+        EditText search = new EditText(this);
+        search.setHint("Поиск");
+        search.setSingleLine(true);
+        search.setBackground(Ui.round(0xFFFFFFFF, dp(16)));
+        search.setPadding(dp(14), dp(12), dp(14), dp(12));
+        c.addView(search, Ui.lp(this, MATCH, WRAP, 10));
+        LinearLayout list = Ui.col(this);
+        c.addView(list, Ui.lp(this, MATCH, WRAP, 8));
+        Dialog d = Ui.sheet(this, c);
+        Runnable fill = () -> {
+            list.removeAllViews();
+            String q = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+            int shown = 0;
+            for (AppEntry a : apps) {
+                if (!q.isEmpty() && !a.label.toLowerCase(Locale.ROOT).contains(q)) continue;
+                if (shown++ > 80) break;
+                LinearLayout row = Ui.row(this);
+                row.setPadding(dp(6), dp(8), dp(6), dp(8));
+                ImageView ic = new ImageView(this);
+                ic.setImageDrawable(AppRepository.icon(this, a));
+                row.addView(ic, new LinearLayout.LayoutParams(dp(36), dp(36)));
+                TextView l = Ui.text(this, a.label, 16, Ui.INK, false);
+                l.setPadding(dp(12), 0, 0, 0);
+                row.addView(l);
+                Ui.clickable(row, 14, () -> {
+                    d.dismiss();
+                    picked.accept(a);
+                });
+                list.addView(row);
+            }
+        };
+        search.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c2) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c2) {}
+            @Override public void afterTextChanged(Editable s) { fill.run(); }
+        });
+        fill.run();
+    }
+
+    // ================================================================== ночь
+
+    private void nightPage() {
+        LinearLayout col = page("Ночной режим");
+        boolean now = Guard.nightNow(prefs);
+        hero(col, R.drawable.ill_moon, 0xFFE0E7FF,
+                prefs.nightMode() ? "Ночь " + Guard.nightRange(prefs) : "Ночной режим выключен",
+                now ? "Сейчас ночь: открыты только звонки, будильник и разрешённые приложения."
+                        : "Ночью открыты только звонки, будильник, Библия и то, что ты разрешишь.");
+
+        LinearLayout card = section(col, null);
+        toggleRow(card, "Ночной режим", "Включить — сразу. Выключить — по коду.", prefs.nightMode(), () -> {
+            if (prefs.nightMode()) {
+                requireCode("Выключить ночной режим.", () -> {
+                    prefs.setNightMode(false);
+                    render();
+                });
+            } else {
+                prefs.setNightMode(true);
+                render();
+            }
+        });
+        divider(card);
+        LinearLayout hours = Ui.row(this);
+        LinearLayout ht = Ui.col(this);
+        ht.addView(Ui.text(this, "Часы", 17, Ui.INK, true));
+        ht.addView(Ui.text(this, "С " + Guard.hhmm(prefs.nightStart()) + " до " + Guard.hhmm(prefs.nightEnd()), 14, Ui.SUB, false));
+        hours.addView(ht, new LinearLayout.LayoutParams(0, WRAP, 1));
+        TextView change = Ui.button(this, "Изменить", Ui.BTN_SOFT);
+        change.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        change.setPadding(dp(14), dp(8), dp(14), dp(8));
+        change.setOnClickListener(v -> requireCode("Изменить часы ночного режима.", () ->
+                pickTime(prefs.nightStart(), s -> {
+                    toast("Теперь — когда ночь заканчивается");
+                    pickTime(prefs.nightEnd(), e -> {
+                        prefs.setNightHours(s, e);
+                        render();
+                    });
+                })));
+        hours.addView(change);
+        card.addView(hours);
+
+        LinearLayout allowed = section(col, "Доступно ночью");
+        allowed.addView(bullet("Звонки, контакты и будильник — всегда"));
+        for (String pkg : prefs.nightAllowed()) {
+            divider(allowed);
+            LinearLayout row = Ui.row(this);
+            ImageView ic = new ImageView(this);
+            ic.setImageDrawable(AppRepository.icon(this, pkg));
+            row.addView(ic, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            TextView l = Ui.text(this, AppRepository.label(this, pkg), 16, Ui.INK, false);
+            l.setPadding(dp(12), 0, 0, 0);
+            row.addView(l, new LinearLayout.LayoutParams(0, WRAP, 1));
+            TextView rm = Ui.button(this, "Убрать", Ui.BTN_DANGER);
+            rm.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            rm.setPadding(dp(14), dp(8), dp(14), dp(8));
+            rm.setOnClickListener(v -> {
+                Set<String> s = prefs.nightAllowed();
+                s.remove(pkg);
+                prefs.setNightAllowed(s);
+                render();
+            });
+            row.addView(rm);
+            allowed.addView(row);
+        }
+        TextView add = Ui.button(this, "Разрешить приложение ночью", Ui.BTN_SOFT);
+        col.addView(add, Ui.lp(this, MATCH, WRAP, 12));
+        add.setOnClickListener(v -> appPicker("Что разрешить ночью?", a ->
+                requireCode("Разрешить «" + a.label + "» ночью.", () -> {
+                    Set<String> s = prefs.nightAllowed();
+                    s.add(a.pkg);
+                    prefs.setNightAllowed(s);
+                    render();
+                })));
+    }
+
+    // ================================================================== чёрно-белый
+
+    private void grayPage() {
+        LinearLayout col = page("Чёрно-белый экран");
+        hero(col, R.drawable.ill_gray, 0xFFF1F5F9, prefs.grayscale() ? "Весь телефон чёрно-белый" : "Цвета включены",
+                "Серый экран скучный — и в телефон меньше тянет залипать.");
+        LinearLayout card = section(col, null);
+        toggleRow(card, "Чёрно-белый экран", "Включить — сразу. Выключить — по коду.", prefs.grayscale(), () -> {
+            if (prefs.grayscale()) {
+                requireCode("Вернуть цвета на экран.", () -> {
+                    prefs.setGrayscale(false);
+                    Guard.setPhoneGrayscale(this, false);
+                    render();
+                });
+            } else {
+                prefs.setGrayscale(true);
+                Guard.enforceGrayscale(this, prefs);
+                render();
+            }
+        });
+        LinearLayout st = section(col, "Управление системой");
+        boolean grant = Guard.canControlSystem(this);
+        statusRow(st, "Разрешение с компьютера", grant, "Выдано — «Фокус» сам держит ч/б экран и защиту",
+                "Не выдано — выдаётся один раз через компьютер", null);
+        if (!grant) {
+            TextView how = Ui.text(this,
+                    "Это разрешение позволяет «Фокусу» самому включать чёрно-белый экран и возвращать защиту, если её выключат. "
+                            + "Подключи телефон к компьютеру кабелем, включи «Отладку по USB» и скажи Claude — он выполнит команду:",
+                    14, Ui.SUB, false);
+            st.addView(how, Ui.lp(this, MATCH, WRAP, 10));
+            TextView cmd = Ui.text(this, "adb shell pm grant " + getPackageName() + " android.permission.WRITE_SECURE_SETTINGS",
+                    13, Ui.INK, false);
+            cmd.setTypeface(Typeface.MONOSPACE);
+            cmd.setTextIsSelectable(true);
+            cmd.setBackground(Ui.round(Ui.GRAY_SOFT, dp(12)));
+            cmd.setPadding(dp(12), dp(10), dp(12), dp(10));
+            st.addView(cmd, Ui.lp(this, MATCH, WRAP, 8));
+        }
+    }
+
+    // ================================================================== ключ
+
+    private void keyPage() {
+        LinearLayout col = page("Ключ");
+        if (pendingSecret != null || !keyOn()) {
+            keySetup(col);
+            return;
+        }
+        hero(col, R.drawable.ill_key, 0xFFEDE9FE, "Ключ настроен",
+                "Ослабить ограничения можно только с кодом из Google Authenticator владельца ключа. Каждый код работает один раз.");
+        LinearLayout card = section(col, null);
+        toggleRow(card, "Защита настроек", "Закрывает экраны, где «Фокус» можно отключить или удалить", prefs.protect(), () -> {
+            if (prefs.protect()) {
+                requireCode("Выключить защиту настроек.", () -> {
+                    prefs.setProtect(false);
+                    render();
+                });
+            } else {
+                prefs.setProtect(true);
+                render();
+            }
+        });
+        TextView rekey = Ui.button(this, "Сменить ключ", Ui.BTN_SOFT);
+        col.addView(rekey, Ui.lp(this, MATCH, WRAP, 16));
+        rekey.setOnClickListener(v -> requireCode("Сменить ключ.", () -> {
+            pendingSecret = Totp.newSecret();
+            render();
+        }));
+        TextView del = Ui.button(this, "Удалить «Фокус»", Ui.BTN_DANGER);
+        col.addView(del, Ui.lp(this, MATCH, WRAP, 10));
+        del.setOnClickListener(v -> requireCode("Удалить «Фокус» с телефона.", this::uninstall));
+    }
+
+    private void keySetup(LinearLayout col) {
+        hero(col, R.drawable.ill_key, 0xFFEDE9FE, pendingSecret == null ? "Ключ для кодов" : "Новый ключ",
+                "Этот шаг делает владелец ключа (жена). Ты в это время не смотришь на экран.");
+        if (pendingSecret == null) {
+            LinearLayout card = section(col, null);
+            card.addView(bullet("Владелец ключа ставит на свой телефон Google Authenticator"));
+            card.addView(bullet("Сканирует QR-код с этого экрана"));
+            card.addView(bullet("Дальше всё, что ослабляет защиту, — только по его коду"));
+            TextView show = Ui.button(this, "Показать ключ", Ui.BTN_PRIMARY);
+            col.addView(show, Ui.lp(this, MATCH, WRAP, 16));
+            show.setOnClickListener(v -> {
+                pendingSecret = Totp.newSecret();
+                render();
+            });
+            return;
+        }
+        LinearLayout card = section(col, "1. Google Authenticator → «+» → «Сканировать QR-код»");
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        Bitmap qr = qr("otpauth://totp/Fokus:" + Uri.encode(Build.MODEL) + "?secret=" + pendingSecret
+                + "&issuer=Fokus&digits=6&period=30", 640);
+        if (qr != null) {
+            ImageView iv = new ImageView(this);
+            iv.setImageBitmap(qr);
+            card.addView(iv, new LinearLayout.LayoutParams(dp(240), dp(240)));
+        }
+        TextView alt = Ui.text(this, "Или «Ввести ключ настройки», тип «По времени»:", 14, Ui.SUB, false);
+        alt.setGravity(Gravity.CENTER);
+        card.addView(alt, Ui.lp(this, WRAP, WRAP, 10));
+        TextView key = Ui.text(this, Totp.pretty(pendingSecret), 18, Ui.INK, true);
+        key.setTypeface(Typeface.MONOSPACE);
+        key.setGravity(Gravity.CENTER);
+        key.setTextIsSelectable(true);
+        card.addView(key, Ui.lp(this, WRAP, WRAP, 6));
+
+        LinearLayout check = section(col, "2. Введи 6 цифр из приложения");
+        EditText et = codeField();
+        check.addView(et);
+        TextView err = Ui.text(this, "", 14, Ui.RED, false);
+        err.setVisibility(View.GONE);
+        check.addView(err, Ui.lp(this, MATCH, WRAP, 8));
+        TextView ok = Ui.button(this, "Готово", Ui.BTN_PRIMARY);
+        col.addView(ok, Ui.lp(this, MATCH, WRAP, 16));
+        ok.setOnClickListener(v -> {
+            if (Totp.verify(prefs, pendingSecret, et.getText().toString())) {
+                prefs.setSecret(pendingSecret);
+                pendingSecret = null;
+                toast("Ключ сохранён");
+                goBack();
+            } else {
+                err.setText("Код не подошёл. Проверь, что время на обоих телефонах автоматическое, и введи новый код.");
+                err.setVisibility(View.VISIBLE);
+            }
+        });
+        TextView cancel = Ui.button(this, "Отмена", Ui.BTN_SOFT);
+        col.addView(cancel, Ui.lp(this, MATCH, WRAP, 10));
+        cancel.setOnClickListener(v -> {
+            pendingSecret = null;
+            goBack();
+        });
+    }
+
+    private Bitmap qr(String text, int size) {
+        try {
+            Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
+            hints.put(EncodeHintType.MARGIN, 1);
+            BitMatrix m = new QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints);
+            int w = m.getWidth(), h = m.getHeight();
+            int[] px = new int[w * h];
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) px[y * w + x] = m.get(x, y) ? 0xFF0F172A : 0xFFFFFFFF;
+            }
+            Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            b.setPixels(px, 0, w, 0, 0, w, h);
+            return b;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void uninstall() {
+        prefs.setUntil("all", System.currentTimeMillis() + 10 * 60_000L);
+        try {
+            DevicePolicyManager dpm = getSystemService(DevicePolicyManager.class);
+            if (dpm != null && dpm.isAdminActive(admin())) dpm.removeActiveAdmin(admin());
+        } catch (Exception ignored) {}
+        handler.postDelayed(() -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + getPackageName())));
+            } catch (Exception e) {
+                toast("Удали «Фокус» в настройках приложений — 10 минут защита выключена");
+            }
+        }, 1200);
+    }
+
+    // ================================================================== временный доступ
+
+    private void unlockPage() {
+        LinearLayout col = page("Временный доступ");
+        hero(col, R.drawable.ill_unlock, 0xFFE0F2FE, "Открыть на время",
+                "Код владельца ключа открывает доступ на выбранное время. Потом всё закроется само.");
+
+        Map<String, Long> active = prefs.activeUnlocks();
+        if (!active.isEmpty()) {
+            LinearLayout card = section(col, "Сейчас открыто");
+            activeUnlocksList(card, active);
+        }
+
+        LinearLayout what = section(col, "Что открыть");
+        choice(what, "Только видео", "YouTube и видеосайты; ночь и правила остаются", "video".equals(unlockScope), () -> {
+            unlockScope = "video";
+            render();
+        });
+        choice(what, "Одно приложение", unlockApp == null ? "Выбрать приложение" : unlockApp.label, "app".equals(unlockScope), () ->
+                appPicker("Какое приложение открыть?", a -> {
+                    unlockScope = "app";
+                    unlockApp = a;
+                    render();
+                }));
+        choice(what, "Всё", "Все ограничения, включая ночь и видео", "all".equals(unlockScope), () -> {
+            unlockScope = "all";
+            render();
+        });
+
+        LinearLayout howLong = section(col, "На сколько");
+        LinearLayout chips = Ui.row(this);
+        int[] mins = {15, 30, 60, 120};
+        String[] names = {"15 мин", "30 мин", "1 час", "2 часа"};
+        for (int i = 0; i < mins.length; i++) {
+            int m = mins[i];
+            boolean sel = unlockMinutes == m;
+            TextView t = Ui.text(this, names[i], 15, sel ? 0xFFFFFFFF : Ui.INK, true);
+            t.setGravity(Gravity.CENTER);
+            t.setPadding(0, dp(12), 0, dp(12));
+            t.setBackground(Ui.round(sel ? 0xFF0284C7 : Ui.GRAY_SOFT, dp(14)));
+            Ui.clickable(t, 14, () -> {
+                unlockMinutes = m;
+                render();
+            });
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, WRAP, 1);
+            if (i > 0) p.leftMargin = dp(8);
+            chips.addView(t, p);
+        }
+        howLong.addView(chips);
+
+        TextView go = Ui.button(this, "Открыть по коду", Ui.BTN_PRIMARY);
+        col.addView(go, Ui.lp(this, MATCH, WRAP, 18));
+        go.setOnClickListener(v -> {
+            if ("app".equals(unlockScope) && unlockApp == null) {
+                toast("Сначала выбери приложение");
+                return;
+            }
+            String scope = "app".equals(unlockScope) ? "app:" + unlockApp.pkg : unlockScope;
+            String what2 = "all".equals(scope) ? "всё" : "video".equals(scope) ? "видео" : "«" + unlockApp.label + "»";
+            requireCode("Открыть " + what2 + " на " + unlockMinutes + " мин.", () -> {
+                prefs.setUntil(scope, System.currentTimeMillis() + unlockMinutes * 60_000L);
+                if ("all".equals(scope) && prefs.grayscale()) Guard.setPhoneGrayscale(this, false);
+                toast("Открыто до " + Guard.clock(prefs.until(scope)));
+                render();
+            });
+        });
+    }
+
+    private void choice(LinearLayout card, String title, String sub, boolean sel, Runnable click) {
+        LinearLayout row = Ui.row(this);
+        row.setPadding(dp(12), dp(12), dp(12), dp(12));
+        GradientDrawable bg = Ui.round(sel ? 0xFFE0F2FE : 0xFFFFFFFF, dp(16));
+        bg.setStroke(dp(sel ? 2 : 1), sel ? 0xFF0284C7 : Ui.LINE);
+        row.setBackground(bg);
+        View dot = new View(this);
+        GradientDrawable d = Ui.round(sel ? 0xFF0284C7 : 0xFFFFFFFF, dp(9));
+        d.setStroke(dp(2), sel ? 0xFF0284C7 : 0xFFCBD5E1);
+        dot.setBackground(d);
+        row.addView(dot, new LinearLayout.LayoutParams(dp(18), dp(18)));
+        LinearLayout txt = Ui.col(this);
+        txt.setPadding(dp(12), 0, 0, 0);
+        txt.addView(Ui.text(this, title, 16, Ui.INK, true));
+        txt.addView(Ui.text(this, sub, 13, Ui.SUB, false));
+        row.addView(txt, new LinearLayout.LayoutParams(0, WRAP, 1));
+        Ui.clickable(row, 16, click);
+        card.addView(row, Ui.lp(this, MATCH, WRAP, card.getChildCount() == 0 ? 0 : 8));
     }
 }

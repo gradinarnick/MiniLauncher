@@ -3,61 +3,69 @@ package com.kolya.minilauncher;
 import android.content.Context;
 import android.content.pm.LauncherActivityInfo;
 import android.content.pm.LauncherApps;
+import android.content.pm.PackageManager;
+import android.graphics.drawable.Drawable;
 import android.os.Process;
-import android.os.UserHandle;
-import android.os.UserManager;
 
 import java.text.Collator;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
-/** Загружает список запускаемых приложений через LauncherApps (включая рабочий профиль). */
+/** Список приложений телефона (по алфавиту) и их иконки. */
 final class AppRepository {
+    private static final Map<String, Drawable> ICONS = new HashMap<>();
 
     private AppRepository() {}
 
-    static List<AppEntry> load(Context context, Prefs prefs) {
-        LauncherApps launcherApps = context.getSystemService(LauncherApps.class);
-        UserManager userManager = context.getSystemService(UserManager.class);
-        UserHandle me = Process.myUserHandle();
-        List<AppEntry> result = new ArrayList<>();
-        String self = context.getPackageName();
-
-        for (UserHandle user : launcherApps.getProfiles()) {
-            // Пропускаем профили, которые сейчас выключены/заблокированы
-            // (например, рабочий профиль на паузе или закрытый Private Space).
-            if (userManager.isQuietModeEnabled(user)) continue;
-            long serial = userManager.getSerialNumberForUser(user);
-            boolean work = !user.equals(me);
-            List<LauncherActivityInfo> infos;
-            try {
-                infos = launcherApps.getActivityList(null, user);
-            } catch (SecurityException e) {
-                continue;
+    static List<AppEntry> load(Context c) {
+        Map<String, AppEntry> map = new LinkedHashMap<>();
+        try {
+            LauncherApps la = c.getSystemService(LauncherApps.class);
+            for (LauncherActivityInfo i : la.getActivityList(null, Process.myUserHandle())) {
+                String pkg = i.getComponentName().getPackageName();
+                if (pkg.equals(c.getPackageName()) || map.containsKey(pkg)) continue;
+                CharSequence l = i.getLabel();
+                map.put(pkg, new AppEntry(pkg, l == null ? pkg : l.toString().trim(), i));
             }
-            for (LauncherActivityInfo info : infos) {
-                if (self.equals(info.getComponentName().getPackageName())) continue;
-                CharSequence l = info.getLabel();
-                String label = l == null ? info.getComponentName().getPackageName() : l.toString().trim();
-                String key = info.getComponentName().flattenToShortString() + "#" + serial;
-                result.add(new AppEntry(key, label, info.getComponentName(), user, work, info));
-            }
-        }
-        applyNames(result, prefs);
-        return result;
+        } catch (Exception ignored) {}
+        List<AppEntry> list = new ArrayList<>(map.values());
+        Collator col = Collator.getInstance(Locale.forLanguageTag("ru"));
+        col.setStrength(Collator.PRIMARY);
+        list.sort((a, b) -> col.compare(a.label, b.label));
+        return list;
     }
 
-    /** Применяет переименования и сортирует по алфавиту (с учётом русского языка). */
-    static void applyNames(List<AppEntry> apps, Prefs prefs) {
-        for (AppEntry a : apps) {
-            String custom = prefs.rename(a.key);
-            String base = custom != null ? custom : a.originalLabel;
-            a.label = a.workProfile ? base + " ·раб" : base;
-            a.searchKey = base.toLowerCase(Locale.getDefault());
+    static Drawable icon(Context c, AppEntry a) {
+        Drawable d = ICONS.get(a.pkg);
+        if (d == null) {
+            try {
+                d = a.info.getIcon(0);
+            } catch (Exception e) {
+                d = c.getPackageManager().getDefaultActivityIcon();
+            }
+            ICONS.put(a.pkg, d);
         }
-        Collator collator = Collator.getInstance(Locale.getDefault());
-        collator.setStrength(Collator.PRIMARY);
-        apps.sort((x, y) -> collator.compare(x.label, y.label));
+        return d;
+    }
+
+    static Drawable icon(Context c, String pkg) {
+        try {
+            return c.getPackageManager().getApplicationIcon(pkg);
+        } catch (Exception e) {
+            return c.getPackageManager().getDefaultActivityIcon();
+        }
+    }
+
+    static String label(Context c, String pkg) {
+        try {
+            PackageManager pm = c.getPackageManager();
+            return pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+        } catch (Exception e) {
+            return pkg;
+        }
     }
 }
