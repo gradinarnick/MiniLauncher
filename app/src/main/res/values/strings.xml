@@ -3,4 +3,6 @@
     <string name="app_name">Фокус</string>
     <string name="guard_name">Фокус — защита</string>
     <string name="guard_desc">Закрывает видео и отвлекающие приложения по твоим правилам. Видит только названия открытых приложений и адрес в браузере, ничего не отправляет.</string>
+    <string name="inbox_name">Сообщения</string>
+    <string name="inbox_service">Фокус — сообщения</string>
 </resources>
