@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp" android:height="108dp"
-    android:viewportWidth="108" android:viewportHeight="108">
-    <!-- Три текстовые строки: символ минимального списка приложений -->
-    <path android:fillColor="#FFFFFFFF" android:pathData="M36,40h36v4h-36z" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M36,52h26v4h-26z" />
-    <path android:fillColor="#FFFFFFFF" android:pathData="M36,64h31v4h-31z" />
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M54,30 L74,37 L74,54 C74,68 65,78 54,83 C43,78 34,68 34,54 L34,37 Z" android:fillColor="#FFFFFF" />
+    <path android:pathData="M45,55 L52,62 L64,48" android:fillColor="#00000000" android:strokeColor="#4F46E5" android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round" />
 </vector>
