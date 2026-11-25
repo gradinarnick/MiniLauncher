@@ -54,7 +54,7 @@ jobs:
           fi
 
       - name: Подготовить APK к релизу
-        run: cp app/build/outputs/apk/release/app-release.apk "MiniLauncher-1.0.${{ github.run_number }}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "MiniLauncher-2.0.${{ github.run_number }}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -64,8 +64,8 @@ jobs:
       - name: Опубликовать релиз
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: MiniLauncher 1.0.${{ github.run_number }}
+          tag_name: v2.0.${{ github.run_number }}
+          name: Фокус 2.0.${{ github.run_number }}
           body: ${{ github.event.head_commit.message }}
-          files: MiniLauncher-1.0.${{ github.run_number }}.apk
+          files: MiniLauncher-2.0.${{ github.run_number }}.apk
           make_latest: "true"
