@@ -40,6 +40,17 @@ public class GuardService extends AccessibilityService {
     private long lastUrlScan;
     private long lastSettingsScan;
 
+    /** Банк не работает со включённой службой: выключаемся на время, потом «Фокус» включит защиту обратно. */
+    static void pauseForBank() {
+        GuardService g = instance;
+        if (g != null) {
+            instance = null;
+            try {
+                g.disableSelf();
+            } catch (Exception ignored) {}
+        }
+    }
+
     static void grantPass(String pkg) {
         passes.put(pkg, System.currentTimeMillis());
     }
@@ -153,19 +164,23 @@ public class GuardService extends AccessibilityService {
     // ------------------------------------------------------------ адресная строка браузера
 
     private void scanUrl(String pkg, boolean force) {
-        if (!Guard.videoFilterActive(prefs)) return;
+        boolean video = Guard.videoFilterActive(prefs);
+        boolean night = Guard.nightSitesBlocked(prefs);
+        if (!video && !night) return;
         long now = System.currentTimeMillis();
         if (!force && now - lastUrlScan < 700) return;
         lastUrlScan = now;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null || root.getPackageName() == null || !pkg.equals(root.getPackageName().toString())) return;
-        if (findVideoUrl(root)) {
+        int hit = findBlockedUrl(root, video, night);
+        if (hit != 0) {
             performGlobalAction(GLOBAL_ACTION_BACK);
-            show(pkg, Guard.videoPageVerdict());
+            show(pkg, hit == 1 ? Guard.videoPageVerdict() : Guard.nightVerdict(prefs));
         }
     }
 
-    private static boolean findVideoUrl(AccessibilityNodeInfo root) {
+    /** 0 — всё в порядке, 1 — видео, 2 — ночью закрытый сайт (соцсеть, магазин). */
+    private static int findBlockedUrl(AccessibilityNodeInfo root, boolean video, boolean night) {
         ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
         queue.add(root);
         int seen = 0;
@@ -178,18 +193,20 @@ public class GuardService extends AccessibilityService {
                 boolean bar = lid.contains("url") || lid.contains("omnibox") || lid.contains("omnibar")
                         || lid.contains("address") || lid.contains("location") || lid.contains("search_box")
                         || lid.contains("title");
+                String t = text.toString();
                 if (n.isEditable() || bar) {
-                    if (Lists.urlBlocked(text.toString())) return true;
+                    if (video && Lists.urlBlocked(t)) return 1;
+                    if (night && Lists.nightUrlBlocked(t)) return 2;
                 }
                 // Яндекс.Браузер и другие показывают в строке заголовок страницы, а не адрес.
-                if (bar && Lists.titleBlocked(text.toString())) return true;
+                if (video && bar && Lists.titleBlocked(t)) return 1;
             }
             for (int i = 0; i < n.getChildCount(); i++) {
                 AccessibilityNodeInfo ch = n.getChild(i);
                 if (ch != null) queue.add(ch);
             }
         }
-        return false;
+        return 0;
     }
 
     // ------------------------------------------------------------ защита от отключения и удаления

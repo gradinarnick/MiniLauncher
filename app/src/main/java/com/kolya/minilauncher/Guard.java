@@ -88,11 +88,8 @@ final class Guard {
         if (pkg == null || pkg.equals(c.getPackageName()) || Lists.isAlwaysAllowed(pkg)) return ALLOW;
         if (temp(p, "all")) return ALLOW;
 
-        if (p.nightMode() && inRange(now, p.nightStart(), p.nightEnd())
-                && !Lists.nightSystem.contains(pkg) && !p.nightAllowed().contains(pkg)) {
-            return new Verdict(BLOCK, "Ночной режим",
-                    "До " + hhmm(p.nightEnd()) + " доступны только звонки, будильник и Библия.\nОтдохни — телефон подождёт.",
-                    R.drawable.ill_moon, 0, true);
+        if (p.nightMode() && inRange(now, p.nightStart(), p.nightEnd()) && nightBlocked(p, pkg)) {
+            return nightVerdict(p);
         }
 
         if (videoFilterActive(p)) {
@@ -140,6 +137,24 @@ final class Guard {
                 break;
         }
         return ALLOW;
+    }
+
+    /** Закрыто ли приложение ночью: соцсети, магазины, игры и то, что ты добавил сам. */
+    static boolean nightBlocked(Prefs p, String pkg) {
+        if (Lists.nightSystem.contains(pkg)) return false;
+        if (p.nightExtra().contains(pkg)) return true;
+        return Lists.nightDefault.contains(pkg) && !p.nightAllowed().contains(pkg);
+    }
+
+    /** Ночью сайты соцсетей и магазинов закрыты (фильтр сети и адресная строка). */
+    static boolean nightSitesBlocked(Prefs p) {
+        return nightNow(p) && !temp(p, "all");
+    }
+
+    static Verdict nightVerdict(Prefs p) {
+        return new Verdict(BLOCK, "Ночной режим",
+                "До " + hhmm(p.nightEnd()) + " закрыты соцсети, магазины, игры и другие отвлекающие приложения.\nОтдохни — телефон подождёт.",
+                R.drawable.ill_moon, 0, true);
     }
 
     static Verdict videoPageVerdict() {

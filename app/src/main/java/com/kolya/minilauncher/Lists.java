@@ -150,6 +150,41 @@ final class Lists {
             "ru.yandex.searchplugin"
     ));
 
+    /** Ночью закрыты: соцсети, магазины и маркетплейсы (остальные приложения ночью работают). */
+    static final Set<String> NIGHT_APPS = new HashSet<>(Arrays.asList(
+            // соцсети и ленты
+            "com.instagram.android", "com.instagram.lite", "com.instagram.barcelona", "com.facebook.katana",
+            "com.facebook.lite", "com.facebook.orca", "com.zhiliaoapp.musically", "com.ss.android.ugc.trill",
+            "com.vkontakte.android", "com.vk.vkclient", "ru.ok.android", "com.twitter.android", "com.snapchat.android",
+            "com.pinterest", "com.reddit.frontpage", "com.tumblr", "com.linkedin.android", "com.discord",
+            "com.quora.android", "com.imgur.mobile", "com.ninegag.android.app", "video.like", "com.yandex.zen",
+            "ru.yandex.searchplugin", "flipboard.app", "com.google.android.apps.magazines",
+            // маркетплейсы и магазины
+            "ru.ozon.app.android", "com.ozon.app.android", "com.wildberries.ru", "com.alibaba.aliexpresshd",
+            "ru.aliexpress.buyer", "com.einnovation.temu", "com.zzkko", "com.amazon.mShop.android.shopping",
+            "com.ebay.mobile", "com.avito.android", "ru.beru.android", "ru.yandex.market", "com.joom",
+            "com.lalafo", "pl.tablica", "md.point.app", "md.ultra.app", "md.darwin.app", "com.shopee.id",
+            "com.lazada.android", "com.alibaba.intl.android.apps.poseidon", "club.fromfactory", "com.wish.android",
+            "com.vinted", "com.etsy.android", "com.kaspi.shop", "kz.kaspi.mobile"
+    ));
+
+    /** Части имени пакета магазинов и соцсетей. */
+    private static final String[] NIGHT_PKG_WORDS = {
+            "ozon", "wildberries", "aliexpress", "temu", "shein", "avito", "joom", "lalafo", "olx", "ebay",
+            "mshop", "allegro", "market", "shop", "999", "telegram", "nekogram", "challegram", "tiktok", "instagram",
+    };
+
+    /** Ночью эти сайты закрыты и в браузерах. */
+    static final String[] NIGHT_DOMAINS = {
+            "facebook.com", "fb.com", "vk.com", "vk.ru", "vk.me", "ok.ru", "twitter.com", "x.com", "t.co", "reddit.com",
+            "pinterest.com", "tumblr.com", "threads.net", "web.telegram.org", "t.me", "dzen.ru", "linkedin.com",
+            "ozon.ru", "ozon.com", "ozone.ru", "wildberries.ru", "wildberries.md", "wb.ru", "aliexpress.com",
+            "aliexpress.ru", "aliexpress.us", "temu.com", "shein.com", "amazon.com", "amazon.de", "amazon.co.uk",
+            "ebay.com", "avito.ru", "market.yandex.ru", "joom.com", "999.md", "lalafo.md", "olx.ua", "olx.pl",
+            "darwin.md", "ultra.md", "enter.online", "maximum.md", "bomba.md", "cactus.md", "etsy.com", "vinted.com",
+            "wish.com", "lamoda.ru", "megamarket.ru", "kaspi.kz",
+    };
+
     /** Notion: видео внутри его страниц можно разрешить отдельно. */
     static final String[] NOTION = {"notion.id", "so.notion.calendar"};
 
@@ -182,6 +217,8 @@ final class Lists {
     static volatile Set<String> launchers = Collections.emptySet();
     static volatile Set<String> nightSystem = Collections.emptySet();
     static volatile Set<String> keyboards = Collections.emptySet();
+    /** Установленные приложения, которые ночью закрыты по умолчанию. */
+    static volatile Set<String> nightDefault = Collections.emptySet();
 
     static void refresh(Context c) {
         PackageManager pm = c.getPackageManager();
@@ -229,6 +266,16 @@ final class Lists {
             if (imm != null) for (InputMethodInfo i : imm.getInputMethodList()) k.add(i.getPackageName());
         } catch (Exception ignored) {}
 
+        Set<String> nd = new HashSet<>();
+        try {
+            for (android.content.pm.ApplicationInfo ai : pm.getInstalledApplications(0)) {
+                if (isNightDefault(ai)) nd.add(ai.packageName);
+            }
+        } catch (Exception ignored) {}
+        nd.removeAll(n);
+        nd.remove(self);
+
+        nightDefault = nd;
         browsers = b;
         vpnApps = v;
         launchers = l;
@@ -268,6 +315,44 @@ final class Lists {
         String p = pkg.toLowerCase(Locale.ROOT);
         for (String w : VIDEO_PKG_WORDS) if (p.contains(w)) return true;
         return false;
+    }
+
+    private static boolean isNightDefault(android.content.pm.ApplicationInfo ai) {
+        String pkg = ai.packageName;
+        if (NIGHT_APPS.contains(pkg) || DISTRACTING.contains(pkg) || isVideoApp(pkg) || isBypassApp(pkg)) return true;
+        int cat = ai.category;
+        if (cat == android.content.pm.ApplicationInfo.CATEGORY_GAME
+                || cat == android.content.pm.ApplicationInfo.CATEGORY_SOCIAL
+                || cat == android.content.pm.ApplicationInfo.CATEGORY_NEWS
+                || cat == android.content.pm.ApplicationInfo.CATEGORY_VIDEO) return true;
+        String p = pkg.toLowerCase(Locale.ROOT);
+        for (String w : NIGHT_PKG_WORDS) if (p.contains(w)) return true;
+        return false;
+    }
+
+    /** Ночью закрыт этот сервер (соцсети, магазины)? */
+    static boolean nightDomainBlocked(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase(Locale.ROOT);
+        if (h.endsWith(".")) h = h.substring(0, h.length() - 1);
+        for (String d : NIGHT_DOMAINS) if (h.equals(d) || h.endsWith("." + d)) return true;
+        return false;
+    }
+
+    /** Ночью: адрес в браузере ведёт на соцсеть или магазин? */
+    static boolean nightUrlBlocked(String text) {
+        if (text == null) return false;
+        String t = text.trim().toLowerCase(Locale.ROOT);
+        if (t.isEmpty() || t.contains(" ")) return false;
+        int scheme = t.indexOf("://");
+        if (scheme >= 0) t = t.substring(scheme + 3);
+        int end = t.length();
+        for (char ch : new char[]{'/', '?', '#', ':'}) {
+            int i = t.indexOf(ch);
+            if (i >= 0 && i < end) end = i;
+        }
+        String host = t.substring(0, end);
+        return host.contains(".") && nightDomainBlocked(host);
     }
 
     static boolean isBypassApp(String pkg) {

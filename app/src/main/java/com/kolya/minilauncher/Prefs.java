@@ -53,6 +53,10 @@ final class Prefs {
     Set<String> nightAllowed() { return new HashSet<>(sp.getStringSet("night_allowed", new HashSet<>())); }
     void setNightAllowed(Set<String> s) { sp.edit().putStringSet("night_allowed", new HashSet<>(s)).commit(); }
 
+    /** Приложения, которые ты сам закрыл на ночь (кроме закрытых по умолчанию). */
+    Set<String> nightExtra() { return new HashSet<>(sp.getStringSet("night_extra", new HashSet<>())); }
+    void setNightExtra(Set<String> s) { sp.edit().putStringSet("night_extra", new HashSet<>(s)).commit(); }
+
     // ------------------------------------------------------------ правила приложений
 
     String rule(String pkg) { return sp.getString("rule:" + pkg, "allow"); }
@@ -111,6 +115,12 @@ final class Prefs {
     void addUsage(String pkg, long ms) {
         sp.edit().putString("use:" + pkg, today() + ":" + (usedToday(pkg) + ms)).apply();
     }
+
+    // ------------------------------------------------------------ банк
+
+    /** Приложение банка, которому мешает служба «Специальных возможностей». */
+    String bankApp() { return sp.getString("bank_app", null); }
+    void setBankApp(String pkg) { sp.edit().putString("bank_app", pkg).commit(); }
 
     // ------------------------------------------------------------ первый запуск
 

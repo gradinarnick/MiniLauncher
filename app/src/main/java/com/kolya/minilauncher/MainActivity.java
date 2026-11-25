@@ -512,6 +512,9 @@ public class MainActivity extends Activity {
             step(card, 4, "Защита от удаления", "Без кода «Фокус» не удалить", adminOn(), this::requestAdmin);
         }
 
+        // ---- банк
+        bankCard(col);
+
         // ---- временный доступ сейчас
         Map<String, Long> active = prefs.activeUnlocks();
         if (!active.isEmpty()) {
@@ -549,6 +552,74 @@ public class MainActivity extends Activity {
         foot.setGravity(Gravity.CENTER);
         foot.setPadding(dp(16), 0, dp(16), 0);
         col.addView(foot, Ui.lp(this, MATCH, WRAP, 22));
+    }
+
+    // ================================================================== банк
+
+    private void bankCard(LinearLayout col) {
+        LinearLayout card = section(col, "Банк");
+        String pkg = prefs.bankApp();
+        boolean active = Guard.temp(prefs, "bank");
+        LinearLayout row = Ui.row(this);
+        if (pkg != null) {
+            ImageView ic = new ImageView(this);
+            ic.setImageDrawable(AppRepository.icon(this, pkg));
+            row.addView(ic, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        } else {
+            row.addView(Ui.image(this, R.drawable.ill_unlock, 44));
+        }
+        LinearLayout txt = Ui.col(this);
+        txt.setPadding(dp(12), 0, dp(8), 0);
+        txt.addView(Ui.text(this, pkg != null ? AppRepository.label(this, pkg) : "Приложение банка", 16, Ui.INK, true));
+        txt.addView(Ui.text(this, active ? "Защита выключена до " + Guard.clock(prefs.until("bank"))
+                : "Защита выключится на 10 минут, чтобы банк заработал. Видео остаётся закрытым.", 13,
+                active ? Ui.AMBER : Ui.SUB, false));
+        row.addView(txt, new LinearLayout.LayoutParams(0, WRAP, 1));
+        TextView open = Ui.button(this, pkg == null ? "Выбрать" : "Открыть", Ui.BTN_PRIMARY);
+        open.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        open.setPadding(dp(14), dp(8), dp(14), dp(8));
+        open.setOnClickListener(v -> openBank());
+        row.addView(open);
+        card.addView(row);
+        if (pkg != null) {
+            TextView change = Ui.text(this, "Сменить приложение банка", 14, Ui.ACCENT, true);
+            change.setPadding(0, dp(12), 0, 0);
+            change.setOnClickListener(v -> pickBank());
+            card.addView(change);
+        }
+    }
+
+    private void pickBank() {
+        appPicker("Какое приложение — банк?", a -> {
+            prefs.setBankApp(a.pkg);
+            render();
+        });
+    }
+
+    private void openBank() {
+        String pkg = prefs.bankApp();
+        if (pkg == null) {
+            pickBank();
+            return;
+        }
+        boolean auto = Guard.canControlSystem(this);
+        Runnable go = () -> {
+            prefs.setUntil("bank", System.currentTimeMillis() + 10 * 60_000L);
+            GuardService.pauseForBank();
+            toast(auto ? "Защита выключена на 10 минут" : "Защита выключена. После банка включи её на главном экране «Фокуса»");
+            Intent li = getPackageManager().getLaunchIntentForPackage(pkg);
+            if (li != null) {
+                li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                handler.postDelayed(() -> {
+                    try {
+                        startActivity(li);
+                    } catch (Exception ignored) {}
+                }, 800);
+            }
+        };
+        // Без разрешения с компьютера «Фокус» не сможет включить защиту сам — тогда только по коду.
+        if (auto) go.run();
+        else requireCode("Выключить защиту, чтобы открыть банк.", go);
     }
 
     private String rulesText(int n) {
@@ -611,7 +682,7 @@ public class MainActivity extends Activity {
             if (!first) divider(card);
             first = false;
             String scope = e.getKey();
-            String name = "all".equals(scope) ? "Всё" : "video".equals(scope) ? "Видео"
+            String name = "all".equals(scope) ? "Всё" : "video".equals(scope) ? "Видео" : "bank".equals(scope) ? "Режим банка"
                     : scope.startsWith("app:") ? AppRepository.label(this, scope.substring(4)) : scope;
             LinearLayout row = Ui.row(this);
             LinearLayout txt = Ui.col(this);
@@ -936,8 +1007,8 @@ public class MainActivity extends Activity {
         boolean now = Guard.nightNow(prefs);
         hero(col, R.drawable.ill_moon, 0xFFE0E7FF,
                 prefs.nightMode() ? "Ночь " + Guard.nightRange(prefs) : "Ночной режим выключен",
-                now ? "Сейчас ночь: открыты только звонки, будильник и разрешённые приложения."
-                        : "Ночью открыты только звонки, будильник, Библия и то, что ты разрешишь.");
+                now ? "Сейчас ночь: соцсети, магазины и игры закрыты, остальное работает."
+                        : "Ночью закрыты соцсети, магазины, игры и видео. Всё остальное работает.");
 
         LinearLayout card = section(col, null);
         toggleRow(card, "Ночной режим", "Включить — сразу. Выключить — по коду.", prefs.nightMode(), () -> {
@@ -971,38 +1042,53 @@ public class MainActivity extends Activity {
         hours.addView(change);
         card.addView(hours);
 
-        LinearLayout allowed = section(col, "Доступно ночью");
-        allowed.addView(bullet("Звонки, контакты и будильник — всегда"));
-        for (String pkg : prefs.nightAllowed()) {
-            divider(allowed);
+        LinearLayout info = section(col, "Как работает");
+        info.addView(bullet("Ночью закрыты соцсети, мессенджеры-ленты, маркетплейсы, магазины, игры и видео"));
+        info.addView(bullet("Сайты соцсетей и магазинов закрыты и в браузерах"));
+        info.addView(bullet("Всё остальное работает: звонки, будильник, Библия, карты, банк, заметки…"));
+
+        Lists.refresh(this);
+        List<AppEntry> closed = new ArrayList<>();
+        for (AppEntry a : apps) if (Guard.nightBlocked(prefs, a.pkg)) closed.add(a);
+        LinearLayout list = section(col, "Закрыто ночью (" + closed.size() + ")");
+        if (closed.isEmpty()) list.addView(Ui.text(this, "Ничего не закрыто", 15, Ui.SUB, false));
+        for (int i = 0; i < closed.size(); i++) {
+            if (i > 0) divider(list);
+            AppEntry a = closed.get(i);
             LinearLayout row = Ui.row(this);
             ImageView ic = new ImageView(this);
-            ic.setImageDrawable(AppRepository.icon(this, pkg));
+            ic.setImageDrawable(AppRepository.icon(this, a));
             row.addView(ic, new LinearLayout.LayoutParams(dp(36), dp(36)));
-            TextView l = Ui.text(this, AppRepository.label(this, pkg), 16, Ui.INK, false);
-            l.setPadding(dp(12), 0, 0, 0);
+            TextView l = Ui.text(this, a.label, 16, Ui.INK, false);
+            l.setPadding(dp(12), 0, dp(8), 0);
+            l.setSingleLine(true);
             row.addView(l, new LinearLayout.LayoutParams(0, WRAP, 1));
-            TextView rm = Ui.button(this, "Убрать", Ui.BTN_DANGER);
-            rm.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-            rm.setPadding(dp(14), dp(8), dp(14), dp(8));
-            rm.setOnClickListener(v -> {
-                Set<String> s = prefs.nightAllowed();
-                s.remove(pkg);
-                prefs.setNightAllowed(s);
+            TextView allow = Ui.button(this, "Разрешить", Ui.BTN_SOFT);
+            allow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            allow.setPadding(dp(14), dp(8), dp(14), dp(8));
+            allow.setOnClickListener(v -> requireCode("Разрешить «" + a.label + "» ночью.", () -> {
+                Set<String> ex = prefs.nightExtra();
+                ex.remove(a.pkg);
+                prefs.setNightExtra(ex);
+                Set<String> al = prefs.nightAllowed();
+                al.add(a.pkg);
+                prefs.setNightAllowed(al);
                 render();
-            });
-            row.addView(rm);
-            allowed.addView(row);
+            }));
+            row.addView(allow);
+            list.addView(row);
         }
-        TextView add = Ui.button(this, "Разрешить приложение ночью", Ui.BTN_SOFT);
+        TextView add = Ui.button(this, "Закрыть ночью ещё приложение", Ui.BTN_SOFT);
         col.addView(add, Ui.lp(this, MATCH, WRAP, 12));
-        add.setOnClickListener(v -> appPicker("Что разрешить ночью?", a ->
-                requireCode("Разрешить «" + a.label + "» ночью.", () -> {
-                    Set<String> s = prefs.nightAllowed();
-                    s.add(a.pkg);
-                    prefs.setNightAllowed(s);
-                    render();
-                })));
+        add.setOnClickListener(v -> appPicker("Что закрыть ночью?", a -> {
+            Set<String> al = prefs.nightAllowed();
+            al.remove(a.pkg);
+            prefs.setNightAllowed(al);
+            Set<String> ex = prefs.nightExtra();
+            ex.add(a.pkg);
+            prefs.setNightExtra(ex);
+            render();
+        }));
     }
 
     // ================================================================== чёрно-белый

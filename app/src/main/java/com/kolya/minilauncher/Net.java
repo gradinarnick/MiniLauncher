@@ -31,6 +31,7 @@ final class Net {
     /** Если защиту в «Специальных возможностях» выключили — включает её обратно. */
     static void ensureAccessibility(Context c) {
         if (!Guard.canControlSystem(c)) return;
+        if (Guard.temp(new Prefs(c), "bank")) return; // идёт «режим банка» — защита выключена на время
         try {
             ContentResolver cr = c.getContentResolver();
             String full = new ComponentName(c, GuardService.class).flattenToString();

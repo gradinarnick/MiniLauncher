@@ -135,7 +135,8 @@ public class FilterVpn extends VpnService {
         byte[] q = Arrays.copyOfRange(pkt, ihl + 8, total);
         String name = Dns.qname(q);
         if (name == null) return;
-        if (Guard.videoFilterActive(prefs) && Lists.domainBlocked(name)) {
+        if ((Guard.videoFilterActive(prefs) && Lists.domainBlocked(name))
+                || (Guard.nightSitesBlocked(prefs) && Lists.nightDomainBlocked(name))) {
             send(src, sport, Dns.blocked(q));
             return;
         }
