@@ -175,10 +175,14 @@ public class GuardService extends AccessibilityService {
             if (text != null && text.length() > 3) {
                 String id = n.getViewIdResourceName();
                 String lid = id == null ? "" : id.toLowerCase(Locale.ROOT);
-                if (n.isEditable() || lid.contains("url") || lid.contains("omnibox") || lid.contains("address")
-                        || lid.contains("location") || lid.contains("search_box")) {
+                boolean bar = lid.contains("url") || lid.contains("omnibox") || lid.contains("omnibar")
+                        || lid.contains("address") || lid.contains("location") || lid.contains("search_box")
+                        || lid.contains("title");
+                if (n.isEditable() || bar) {
                     if (Lists.urlBlocked(text.toString())) return true;
                 }
+                // Яндекс.Браузер и другие показывают в строке заголовок страницы, а не адрес.
+                if (bar && Lists.titleBlocked(text.toString())) return true;
             }
             for (int i = 0; i < n.getChildCount(); i++) {
                 AccessibilityNodeInfo ch = n.getChild(i);

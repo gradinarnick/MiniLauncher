@@ -32,7 +32,9 @@ final class Lists {
             "kwai.com", "kwai.net", "triller.co", "coub.com", "snackvideo.com",
             // Русскоязычные видеосервисы
             "rutube.ru", "rutube.sport", "rtbcdn.ru", "vkvideo.ru", "vk.video", "video.mail.ru", "dzen.ru", "zen.yandex.ru",
-            "frontend.vh.yandex.ru", "strm.yandex.ru", "ivi.ru", "ivi.tv", "okko.tv", "okko.sport", "more.tv", "start.ru",
+            "frontend.vh.yandex.ru", "strm.yandex.ru", "strm.yandex.net", "vh.yandex.ru", "vh.yandex.net",
+            "video.yandex.ru", "video.yandex.net", "video.yandex.com", "efir.yandex.ru", "video-preview.s3.yandex.net",
+            "dzeninfra.ru", "zencdn.net", "zen.yandex.net", "ivi.ru", "ivi.tv", "okko.tv", "okko.sport", "more.tv", "start.ru",
             "wink.ru", "premier.one", "kion.ru", "smotrim.ru", "1tv.ru", "ntv.ru", "ctc.ru", "tnt-online.ru", "kinopoisk.ru",
             "hd.kinopoisk.ru", "kinogo.biz", "lordfilm.lu", "hdrezka.ag", "rezka.ag", "rezka.cc", "hdrezka.me", "kinogo.ec",
             "filmix.ac", "baskino.me", "zona.plus", "megogo.net", "sweet.tv",
@@ -64,7 +66,14 @@ final class Lists {
             "vk.com/video", "vk.com/clip", "vk.com/vkvideo", "m.vk.com/video", "vk.ru/video", "vk.ru/clip",
             "my.mail.ru/video", "facebook.com/watch", "facebook.com/reel", "fb.watch", "x.com/i/broadcasts",
             "yandex.ru/video", "ya.ru/video", "yandex.com/video", "yandex.by/video", "yandex.kz/video",
+            "yandex.ru/efir", "ya.ru/efir", "yandex.md/video", "yandex.ua/video", "yandex.uz/video",
             "tbm=vid", "udm=7",
+    };
+
+    /** Заголовки страниц видеосервисов (браузеры, которые показывают заголовок вместо адреса, — например Яндекс). */
+    static final String[] VIDEO_TITLES = {
+            "яндекс видео", "яндекс.видео", "видео — яндекс", "видео - яндекс", "яндекс эфир", "youtube", "rutube",
+            "vk видео", "вк видео", "vk video", "tiktok", "twitch", "кинопоиск", "дзен видео", "ok видео",
     };
 
     /** Серверы «защищённого DNS» — через них браузер мог бы обойти фильтр. */
@@ -273,6 +282,14 @@ final class Lists {
         for (String d : VIDEO_DOMAINS) if (h.equals(d) || h.endsWith("." + d)) return true;
         for (String d : DOH_DOMAINS) if (h.equals(d) || h.endsWith("." + d)) return true;
         for (String w : VIDEO_WORDS) if (h.contains(w)) return true;
+        return false;
+    }
+
+    /** Заголовок страницы в адресной строке — видеосервис? */
+    static boolean titleBlocked(String text) {
+        if (text == null) return false;
+        String t = text.toLowerCase(Locale.ROOT).replace('ё', 'е');
+        for (String w : VIDEO_TITLES) if (t.contains(w)) return true;
         return false;
     }
 
