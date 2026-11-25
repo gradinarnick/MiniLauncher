@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Значок «Сообщения»: белое облачко с тремя точками (в безопасной зоне 66dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M40,34 H68 A10,10 0 0,1 78,44 V60 A10,10 0 0,1 68,70 H50 L38,79 V70 A10,10 0 0,1 30,60 V44 A10,10 0 0,1 40,34 Z"
+        android:fillColor="#FFFFFF" />
+    <path android:pathData="M41,52 A4,4 0 1,1 49,52 A4,4 0 1,1 41,52 Z" android:fillColor="#229ED9" />
+    <path android:pathData="M50,52 A4,4 0 1,1 58,52 A4,4 0 1,1 50,52 Z" android:fillColor="#229ED9" />
+    <path android:pathData="M59,52 A4,4 0 1,1 67,52 A4,4 0 1,1 59,52 Z" android:fillColor="#229ED9" />
+</vector>
