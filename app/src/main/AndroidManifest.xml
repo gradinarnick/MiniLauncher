@@ -60,6 +60,41 @@
                 android:resource="@xml/guard_service" />
         </service>
 
+        <!-- Общие входящие: отдельный значок «Сообщения» на рабочем столе -->
+        <activity
+            android:name=".InboxActivity"
+            android:exported="false"
+            android:label="@string/inbox_name"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.kolya.minilauncher.inbox"
+            android:enableOnBackInvokedCallback="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale" />
+
+        <activity-alias
+            android:name=".InboxLauncher"
+            android:targetActivity=".InboxActivity"
+            android:exported="true"
+            android:label="@string/inbox_name"
+            android:icon="@mipmap/ic_inbox"
+            android:roundIcon="@mipmap/ic_inbox">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Читает только уведомления Telegram, WhatsApp, Viber и VK; переписка остаётся на телефоне -->
+        <service
+            android:name=".InboxService"
+            android:exported="true"
+            android:label="@string/inbox_service"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <service
             android:name=".FilterVpn"
             android:exported="false"
