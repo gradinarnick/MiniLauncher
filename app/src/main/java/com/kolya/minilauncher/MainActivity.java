@@ -512,6 +512,9 @@ public class MainActivity extends Activity {
             step(card, 4, "Защита от удаления", "Без кода «Фокус» не удалить", adminOn(), this::requestAdmin);
         }
 
+        // ---- общие входящие
+        inboxCard(col);
+
         // ---- банк
         bankCard(col);
 
@@ -552,6 +555,29 @@ public class MainActivity extends Activity {
         foot.setGravity(Gravity.CENTER);
         foot.setPadding(dp(16), 0, dp(16), 0);
         col.addView(foot, Ui.lp(this, MATCH, WRAP, 22));
+    }
+
+    // ================================================================== сообщения
+
+    private void inboxCard(LinearLayout col) {
+        LinearLayout card = section(col, "Сообщения");
+        LinearLayout row = Ui.row(this);
+        row.addView(Ui.image(this, R.drawable.ill_chat, 52));
+        LinearLayout txt = Ui.col(this);
+        txt.setPadding(dp(12), 0, dp(8), 0);
+        boolean on = Inbox.enabled(this);
+        int unread = on ? Inbox.unreadTotal(this) : 0;
+        txt.addView(Ui.text(this, !on ? "Все мессенджеры в одном месте" : unread > 0
+                ? InboxActivity.unreadText(unread) : "Всё прочитано", 16, Ui.INK, true));
+        txt.addView(Ui.text(this, "Telegram, WhatsApp, Viber и VK — читать и отвечать без лент и видео", 13, Ui.SUB, false));
+        row.addView(txt, new LinearLayout.LayoutParams(0, WRAP, 1));
+        TextView b = Ui.button(this, on ? "Открыть" : "Включить", Ui.BTN_PRIMARY);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        b.setPadding(dp(14), dp(8), dp(14), dp(8));
+        b.setOnClickListener(v -> startActivity(new Intent(this, InboxActivity.class)));
+        row.addView(b);
+        Ui.clickable(row, 16, () -> startActivity(new Intent(this, InboxActivity.class)));
+        card.addView(row);
     }
 
     // ================================================================== банк
