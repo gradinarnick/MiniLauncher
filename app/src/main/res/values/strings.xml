@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Mini Launcher</string>
+    <string name="app_name">Фокус</string>
+    <string name="guard_name">Фокус — защита</string>
+    <string name="guard_desc">Закрывает видео и отвлекающие приложения по твоим правилам. Видит только названия открытых приложений и адрес в браузере, ничего не отправляет.</string>
 </resources>
