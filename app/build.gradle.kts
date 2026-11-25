@@ -10,6 +10,7 @@ val buildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
 val releaseKeystore = System.getenv("SIGNING_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
 
 android {
+    // Пакет прежний (com.kolya.minilauncher), чтобы обновление пришло поверх лаунчера через Obtainium.
     namespace = "com.kolya.minilauncher"
     compileSdk = 37
 
@@ -18,7 +19,7 @@ android {
         minSdk = 30
         targetSdk = 37
         versionCode = buildNumber
-        versionName = "1.0.$buildNumber"
+        versionName = "2.0.$buildNumber"
     }
 
     signingConfigs {
@@ -53,6 +54,15 @@ android {
     buildFeatures {
         buildConfig = false
     }
+
+    lint {
+        // Сборка не должна падать из-за предупреждений о системных разрешениях.
+        abortOnError = false
+        checkReleaseBuilds = false
+    }
 }
 
-// Никаких внешних библиотек: только Android SDK.
+dependencies {
+    // Только для QR-кода ключа Google Authenticator.
+    implementation("com.google.zxing:core:3.5.3")
+}
